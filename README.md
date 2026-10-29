@@ -18,7 +18,7 @@ corepack pnpm install
 LIGHTPANDA_CDP_URL=http://127.0.0.1:9222 pnpm start
 ```
 
-The API listens on port `3000` by default. `PORT`, `HOST`, `LIGHTPANDA_CDP_URL`, `API_KEY`, `MAX_BODY_BYTES`, `MAX_CRAWL_PAGES`, `MAX_CONCURRENCY`, and `JOB_TTL_MS` can be configured with environment variables. The default CDP endpoint is `http://127.0.0.1:9222`; completed in-memory jobs expire after 24 hours by default.
+The API listens on port `4000` by default. `PORT`, `HOST`, `LIGHTPANDA_CDP_URL`, `API_KEY`, `MAX_BODY_BYTES`, `MAX_CRAWL_PAGES`, `MAX_CONCURRENCY`, and `JOB_TTL_MS` can be configured with environment variables. The default CDP endpoint is `http://127.0.0.1:9222`; completed in-memory jobs expire after 24 hours by default.
 
 Requests are logged as JSON to stdout (timestamp, method, path, status, and duration). Follow the API logs with `docker compose logs -f firepanda`, or both API and Lightpanda logs with `docker compose logs -f`.
 
@@ -39,7 +39,7 @@ Both `/v1` and `/v2` prefixes are accepted.
 Example scrape:
 
 ```sh
-curl http://localhost:3000/v1/scrape \
+curl http://localhost:4000/v1/scrape \
   -H 'Content-Type: application/json' \
   -d '{"url":"https://example.com","formats":["markdown","html","links"]}'
 ```
@@ -47,7 +47,7 @@ curl http://localhost:3000/v1/scrape \
 Example crawl:
 
 ```sh
-curl http://localhost:3000/v1/crawl \
+curl http://localhost:4000/v1/crawl \
   -H 'Content-Type: application/json' \
   -d '{"url":"https://example.com","limit":10,"scrapeOptions":{"formats":["markdown"]}}'
 ```

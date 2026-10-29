@@ -7,9 +7,9 @@ services:
   firepanda:
     build: .
     ports:
-      - "${PORT:-3000}:3000"
+      - "${PORT:-4000}:4000"
     environment:
-      PORT: 3000
+      PORT: 4000
       HOST: 0.0.0.0
       LIGHTPANDA_CDP_URL: http://lightpanda:9222
       API_KEY: ${API_KEY:-}

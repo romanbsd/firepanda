@@ -4,7 +4,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import puppeteer from 'puppeteer-core';
 import TurndownService from 'turndown';
 
-const PORT = Number(process.env.PORT || 3000);
+const PORT = Number(process.env.PORT || 4000);
 const HOST = process.env.HOST || '0.0.0.0';
 const CDP_URL = process.env.LIGHTPANDA_CDP_URL || 'http://127.0.0.1:9222';
 const API_KEY = process.env.API_KEY || '';
