@@ -1,0 +1,20 @@
+services:
+  lightpanda:
+    image: ${LIGHTPANDA_IMAGE:-lightpanda/browser:latest}
+    command: ["/bin/lightpanda", "serve", "--host", "0.0.0.0", "--advertise-host", "lightpanda", "--port", "9222"]
+    expose: ["9222"]
+    restart: unless-stopped
+  firepanda:
+    build: .
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      PORT: 3000
+      HOST: 0.0.0.0
+      LIGHTPANDA_CDP_URL: http://lightpanda:9222
+      API_KEY: ${API_KEY:-}
+      MAX_CRAWL_PAGES: ${MAX_CRAWL_PAGES:-100}
+      MAX_CONCURRENCY: ${MAX_CONCURRENCY:-4}
+    depends_on:
+      - lightpanda
+    restart: unless-stopped

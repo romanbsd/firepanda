@@ -1,0 +1,14 @@
+{
+  "name": "firepanda",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@12.16.1",
+  "description": "A lightweight Firecrawl-compatible scraping API powered by Lightpanda",
+  "engines": { "node": ">=26" },
+  "scripts": { "start": "node src/server.js" },
+  "dependencies": {
+    "puppeteer-core": "^24.10.2",
+    "turndown": "^7.2.0"
+  }
+}
