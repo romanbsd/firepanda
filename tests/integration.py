@@ -63,6 +63,32 @@ def tool(name, **arguments):
 try:
     tool_list = rpc("tools/list")
     assert len(tool_list["tools"]) == 3
+    ready = tool("scrape", url=url + "/ready", waitForSelector="#ready", waitForText="Content ready", timeout=3000)
+    assert "**ready**" in ready["markdown"], ready
+    assert ready["metadata"]["httpStatus"] == 200, ready
+    for arguments in ({"waitForText": "Content ready"}, {"waitForSelector": "#absent"}, {"waitForSelector": "["}):
+        failed = rpc("tools/call", name="scrape", arguments={"url": url + "/never", "timeout": 350, **arguments})
+        assert failed["isError"], (arguments, failed)
+    ready_map = tool("map", url=url + "/ready", waitForText="Content ready", limit=1, maxDepth=0)
+    assert len(ready_map["links"]) == 1 and not ready_map["errors"], ready_map
+    challenge = tool("scrape", url=url + "/challenge")
+    assert "suspected_block" in [w["code"] for w in challenge["warnings"]], challenge
+    assert "verification" in challenge["markdown"], challenge
+    error_page = tool("scrape", url=url + "/error-page")
+    assert error_page["metadata"]["httpStatus"] == 200, error_page
+    assert [w["code"] for w in error_page["warnings"]] == ["suspected_error_page"], error_page
+    actual_error = tool("scrape", url=url + "/http-redirect")
+    assert actual_error["metadata"]["httpStatus"] == 503, actual_error
+    assert [w["code"] for w in actual_error["warnings"]] == ["http_error"], actual_error
+    good = tool("scrape", url=url + "/http-ok-subframe")
+    assert good["metadata"]["httpStatus"] == 200 and "warnings" not in good, good
+    assert "warnings" not in tool("scrape", url=url + "/ordinary-article")
+    empty = tool("scrape", url=url + "/empty")
+    assert [w["code"] for w in empty["warnings"]] == ["empty_content"], empty
+    warning_map = tool("map", url=url + "/http-error", limit=1, maxDepth=0)
+    assert warning_map["warnings"][0]["warnings"][-1]["code"] == "http_error", warning_map
+    warning_crawl = tool("crawl", url=url + "/http-error", limit=1, maxDepth=0)
+    assert warning_crawl["pages"][0]["metadata"]["httpStatus"] == 503, warning_crawl
     listing = tool("scrape", url=url + "/listing", formats=["markdown", "text", "html", "rawHtml"])
     for text in ("All products", "First product", "First description", "Second product", "Second description"):
         for format in ("markdown", "text", "html"):
@@ -210,6 +236,7 @@ def check_sigterm(arguments):
 try:
     check_sigterm({"url": url + "/slow"})
     check_sigterm({"url": url, "waitFor": 30000, "timeout": 60000})
+    check_sigterm({"url": url + "/never", "waitForSelector": "#absent", "timeout": 60000})
 finally:
     server.shutdown()
 print("PASS: SIGTERM during navigation and post-load wait cleans up the owned browser")

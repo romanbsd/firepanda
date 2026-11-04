@@ -3,6 +3,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import unittest
 
 BINARY = sys.argv[1]
@@ -16,8 +17,13 @@ def request(i, method, **params):
 
 def run(messages):
     data = "\n".join(x if isinstance(x, str) else json.dumps(x) for x in messages) + "\n"
-    result = subprocess.run([BINARY, "--lightpanda", "/missing/lightpanda"], input=data,
-                            capture_output=True, text=True, timeout=15, check=True)
+    # Batch input can exceed pipe capacity while responses are still being written.
+    # Keep interactive tests on pipes; use a seekable source for these pipelined batches.
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as source:
+        source.write(data)
+        source.seek(0)
+        result = subprocess.run([BINARY, "--lightpanda", "/missing/lightpanda"], stdin=source,
+                                capture_output=True, text=True, timeout=15, check=True)
     return [json.loads(line) for line in result.stdout.splitlines()]
 
 
@@ -40,6 +46,11 @@ class Protocol(unittest.TestCase):
         self.assertNotIn("resultType", out[4]["result"])
         self.assertEqual(out[5]["result"], {})
         self.assertEqual(out[6]["error"]["code"], -32022)
+        for tool in out[0]["result"]["tools"]:
+            properties = tool["inputSchema"]["properties"]
+            for name in ("waitForSelector", "waitForText"):
+                self.assertEqual(properties[name]["type"], "string")
+                self.assertEqual(properties[name]["minLength"], 1)
 
     def test_invalid_requests_recover(self):
         out = run(["{", "[]", request(1, "unknown", _meta=META),
@@ -82,6 +93,14 @@ class Protocol(unittest.TestCase):
                 "url": "https://example.com", field: v}) for i, v in enumerate(invalid)])
             self.assertEqual([x["id"] for x in out], list(range(len(invalid))))
             self.assertTrue(all(x["error"]["code"] == -32602 for x in out), (field, out))
+
+    def test_readiness_validation_before_browser(self):
+        for field, maximum in (("waitForSelector", 2048), ("waitForText", 4096)):
+            values = [None, False, 1, [], {}, "", "x" * (maximum + 1), "日" * maximum]
+            out = run([request(i, "tools/call", _meta=META, name="scrape", arguments={
+                "url": "https://example.com", field: value}) for i, value in enumerate(values)])
+            self.assertEqual([x["id"] for x in out], list(range(len(values))))
+            self.assertTrue(all(x.get("error", {}).get("code") == -32602 for x in out), (field, out))
 
     def test_invalid_ipv6_rejected_before_browser_start(self):
         urls = ["http://[dead]/", "http://[:::]/", "http://[1:2:3]/"]

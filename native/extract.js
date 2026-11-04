@@ -1,5 +1,34 @@
 // Runs once in the page: project content before serializing it over CDP.
-(options => {
+(async options => {
+  // Read DOM text without matching source-code strings embedded in scripts.
+  function* textNodes() {
+    const walker = document.createTreeWalker(document.body || document.documentElement, 4);
+    let node;
+    while ((node = walker.nextNode())) {
+      if (!node.parentElement?.closest('script,style,noscript,template')) yield node.textContent || '';
+    }
+  }
+  const hasText = needle => {
+    let tail = '';
+    for (const text of textNodes()) {
+      const joined = tail + text;
+      if (joined.includes(needle)) return true;
+      tail = needle.length > 1 ? joined.slice(1 - needle.length) : '';
+    }
+    return false;
+  };
+  if (options.waitForSelector || options.waitForText) {
+    const ready = () => (!options.waitForSelector || document.querySelector(options.waitForSelector)) &&
+      (!options.waitForText || hasText(options.waitForText));
+    // Validate selector syntax before scheduling timers. Both conditions must hold together.
+    if (options.waitForSelector) document.querySelector(options.waitForSelector);
+    const end = Date.now() + options.readyTimeout;
+    // Poll in the page, keeping this wait and extraction to one CDP round trip.
+    while (!ready()) {
+      if (Date.now() >= end) throw new Error('Content readiness timed out');
+      await new Promise(resolve => setTimeout(resolve, Math.min(50, Math.max(1, end - Date.now()))));
+    }
+  }
   let content;
   // Map and rawHtml-only requests do not need a second DOM tree at all.
   if (options.formats.some(f => ['markdown', 'text', 'html'].includes(f))) {
@@ -104,5 +133,36 @@
       }
     }
   }
+  // Heuristics are warnings, not proof that access failed. Never discard the page.
+  let sample = '';
+  for (const text of textNodes()) {
+    sample += text.slice(0, 8192 - sample.length);
+    if (sample.length === 8192) break;
+  }
+  sample = sample.replace(/\s+/g, ' ').trim().toLowerCase();
+  const title = (document.title || '').trim().toLowerCase();
+  const warnings = [];
+  const warn = (code, message) => warnings.push({code, message});
+  const short = sample.length < 1000;
+  const challengeFrame = short && Array.from(document.querySelectorAll('iframe[src]')).some(frame => {
+    try {
+      const host = new URL(frame.getAttribute('src'), document.baseURI || location.href).hostname;
+      return host === 'geo.captcha-delivery.com' || host === 'challenges.cloudflare.com';
+    } catch { return false; }
+  });
+  if (/^(just a moment(?:\.{3}|…)?|checking your browser(?:\s*[-–].*)?|client challenge|vercel security checkpoint|attention required.*)$/.test(title) ||
+      (short && /performing security verification|checking your browser before accessing|we're verifying your browser/.test(sample)) || challengeFrame) {
+    warn('suspected_block', 'The page appears to contain a security challenge instead of the requested content.');
+  }
+  if (/^(?:error\s+)?[45]\d\d\b/.test(title) || /^error page(?:\s*[|:–-]|$)/.test(title) ||
+      (short && /^(?:error\s+)?[45]\d\d\b/.test(sample))) {
+    warn('suspected_error_page', 'The page appears to be an error document; this is a content heuristic.');
+  }
+  const projected = options.formats.filter(f => ['markdown', 'text', 'html'].includes(f));
+  if ((projected.length && projected.every(f => !data[f].trim())) ||
+      (!projected.length && options.formats.includes('links') && !data.links.length)) {
+    warn('empty_content', 'The requested content is empty; a readiness condition may be needed.');
+  }
+  if (warnings.length) data.warnings = warnings;
   return data;
 })

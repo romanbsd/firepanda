@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <httplib.h>
 #include <mutex>
+#include <optional>
 #include <spawn.h>
 #include <sys/wait.h>
 #include <thread>
@@ -22,6 +23,10 @@ std::atomic<bool> stop_requested{false};
 using Clock = std::chrono::steady_clock;
 using namespace std::chrono_literals;
 namespace {
+class CdpError : public std::runtime_error {
+public:
+  using std::runtime_error::runtime_error;
+};
 class SocketDeadline {
   std::mutex mutex_;
   std::condition_variable changed_;
@@ -115,6 +120,9 @@ struct Browser::Impl {
   uint64_t next_id = 0;
   std::string active_session;
   bool page_loaded = false;
+  std::string main_frame;
+  std::optional<int> http_status;
+  std::vector<std::pair<std::string, int>> early_document_statuses;
   const bool owns_process;
   explicit Impl(Options o) : options(std::move(o)), owns_process(options.socket.empty()) {}
   ~Impl() {
@@ -267,6 +275,43 @@ struct Browser::Impl {
         message.value("sessionId", "") == active_session) {
       page_loaded = true;
     }
+    if (message.value("method", "") != "Network.responseReceived" ||
+        message.value("sessionId", "") != active_session) {
+      return;
+    }
+    const auto params = message.find("params");
+    if (params == message.end() || !params->is_object() ||
+        params->value("type", "") != "Document") {
+      return;
+    }
+    const auto frame = params->find("frameId"), response = params->find("response");
+    if (frame == params->end() || !frame->is_string() ||
+        frame->get_ref<const std::string &>().size() > 256 || response == params->end() ||
+        !response->is_object()) {
+      return;
+    }
+    const auto status = response->find("status");
+    if (status == response->end() || !status->is_number() || *status < 100 || *status > 599) {
+      return;
+    }
+    const int number = status->get<int>();
+    if (*status != number) {
+      return;
+    }
+    const auto &id = frame->get_ref<const std::string &>();
+    if (!main_frame.empty()) {
+      if (id == main_frame) {
+        http_status = number; // Subframe responses cannot overwrite the document.
+      }
+    } else {
+      auto found = std::find_if(early_document_statuses.begin(), early_document_statuses.end(),
+                                [&](const auto &entry) { return entry.first == id; });
+      if (found != early_document_statuses.end()) {
+        found->second = number;
+      } else if (early_document_statuses.size() < 16) {
+        early_document_statuses.emplace_back(id, number);
+      }
+    }
   }
   Json call(const std::string &method, Json params, const std::string &session,
             Clock::time_point deadline) {
@@ -295,7 +340,7 @@ struct Browser::Impl {
         throw std::runtime_error("Malformed CDP response envelope");
       }
       if (response.contains("error")) {
-        throw std::runtime_error(method + ": " + response["error"].dump());
+        throw CdpError(method + ": " + response["error"].dump());
       }
       if (!response.at("result").is_object()) {
         throw std::runtime_error("CDP result must be an object");
@@ -332,9 +377,24 @@ Json Browser::scrape(const PageRequest &request) {
         b.call("Target.attachToTarget", {{"targetId", page}, {"flatten", true}}, "", deadline)
             .at("sessionId");
     b.active_session = session;
+    b.main_frame.clear();
+    b.http_status.reset();
+    b.early_document_statuses.clear();
     b.call("Page.enable", Json::object(), session, deadline);
+    try {
+      b.call("Network.enable", Json::object(), session, deadline);
+    } catch (const CdpError &) {
+      // Older CDP peers may lack Network; transport/timeouts still fail normally.
+    }
     b.page_loaded = false;
     const auto navigation = b.call("Page.navigate", {{"url", request.url}}, session, deadline);
+    b.main_frame = navigation.value("frameId", "");
+    for (const auto &[frame, status] : b.early_document_statuses) {
+      if (!b.main_frame.empty() && frame == b.main_frame) {
+        b.http_status = status;
+      }
+    }
+    b.early_document_statuses.clear();
     if (navigation.contains("errorText")) {
       throw std::runtime_error(navigation["errorText"].get<std::string>());
     }
@@ -351,10 +411,18 @@ Json Browser::scrape(const PageRequest &request) {
       }
       std::this_thread::sleep_until(std::min(wait_end, Clock::now() + 50ms));
     }
-    Json extraction{{"formats", request.formats}, {"onlyMainContent", request.only_main_content}};
+    Json extraction{
+        {"formats", request.formats},
+        {"onlyMainContent", request.only_main_content},
+        {"waitForSelector", request.wait_for_selector},
+        {"waitForText", request.wait_for_text},
+        {"readyTimeout", std::max<int64_t>(0, std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                  deadline - Clock::now())
+                                                  .count())}};
     auto value = b.call("Runtime.evaluate",
                         {{"expression", std::string(extraction_js) + "(" + extraction.dump() + ")"},
-                         {"returnByValue", true}},
+                         {"returnByValue", true},
+                         {"awaitPromise", true}},
                         session, deadline);
     if (value.contains("exceptionDetails")) {
       throw std::runtime_error("Page extraction failed: " + value["exceptionDetails"].dump());
@@ -385,7 +453,31 @@ Json Browser::scrape(const PageRequest &request) {
       throw std::runtime_error("Invalid extraction truncation flag");
     }
     result["metadata"]["sourceURL"] = request.url;
-    // Do not invent an HTTP status from load events.
+    if (result.contains("warnings")) {
+      const auto &warnings = result["warnings"];
+      if (!warnings.is_array() || warnings.size() > 3) {
+        throw std::runtime_error("Malformed extraction warnings");
+      }
+      for (const auto &warning : warnings) {
+        if (!warning.is_object() || !warning.contains("code") || !warning["code"].is_string() ||
+            warning["code"].get_ref<const std::string &>().size() > 64 ||
+            !warning.contains("message") || !warning["message"].is_string() ||
+            warning["message"].get_ref<const std::string &>().size() > 512) {
+          throw std::runtime_error("Malformed extraction warning");
+        }
+      }
+    }
+    if (b.http_status) {
+      result["metadata"]["httpStatus"] = *b.http_status;
+      if (*b.http_status >= 400) {
+        if (!result.contains("warnings")) {
+          result["warnings"] = Json::array();
+        }
+        result["warnings"].push_back(
+            {{"code", "http_error"},
+             {"message", "Document returned HTTP " + std::to_string(*b.http_status)}});
+      }
+    }
     b.call("Target.disposeBrowserContext", {{"browserContextId", context}}, "", deadline);
     return result;
   } catch (...) {

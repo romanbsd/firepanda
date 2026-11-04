@@ -105,6 +105,9 @@ class Peer:
                         reply["result"] = {"targetId": "page"}
                     elif method == "Target.attachToTarget":
                         reply["result"] = {"sessionId": "session"}
+                    elif method == "Network.enable" and self.mode == "no_network":
+                        reply.pop("result")
+                        reply["error"] = {"code": -32601, "message": "unsupported"}
                     elif method == "Page.navigate":
                         self.entered.set()
                         if self.mode in ("pings", "fragments"):
@@ -116,6 +119,11 @@ class Peer:
                                 connection.sendall(frame(b"", opcode=9 if self.mode == "pings" else 0, final=self.mode == "pings"))
                                 time.sleep(0.02)
                             continue
+                        if self.mode in ("status", "fractional_status"):
+                            reply["result"] = {"frameId": "main"}
+                            for frame_id, status in (("main", 201 if self.mode == "status" else 201.5), ("child", 503)):
+                                connection.sendall(frame({"method": "Network.responseReceived", "sessionId": "session", "params": {
+                                    "type": "Document", "frameId": frame_id, "response": {"status": status}}}))
                         connection.sendall(frame({"method": "Page.loadEventFired", "sessionId": "session"}))
                     elif method == "Runtime.evaluate":
                         if self.mode == "missing_result":
@@ -129,6 +137,8 @@ class Peer:
                             continue
                         else:
                             reply["result"] = {"result": {"value": {"metadata": {"url": "https://example.com/", "title": "Mock"}, "markdown": "hello"}}}
+                            if self.mode == "bad_warnings":
+                                reply["result"]["result"]["value"]["warnings"] = [False]
                     connection.sendall(frame(reply))
             except (OSError, EOFError):
                 pass
@@ -186,7 +196,7 @@ class Transport(unittest.TestCase):
         return response["result"]
 
     def test_malformed_reply_and_recovery(self):
-        for mode in ("missing_result", "conflicting_result", "missing_format", "deep_json"):
+        for mode in ("missing_result", "conflicting_result", "missing_format", "deep_json", "bad_warnings"):
             with self.subTest(mode=mode):
                 self.peer.mode = mode
                 self.send()
@@ -194,6 +204,15 @@ class Transport(unittest.TestCase):
                 self.peer.mode = "valid"
                 self.send()
                 self.assertEqual(self.receive()["structuredContent"]["markdown"], "hello")
+
+    def test_status_is_observed_main_document_only_and_optional(self):
+        self.peer.mode = "status"
+        self.send()
+        self.assertEqual(self.receive()["structuredContent"]["metadata"]["httpStatus"], 201)
+        for mode in ("valid", "no_network", "fractional_status"):
+            self.peer.mode = mode
+            self.send()
+            self.assertNotIn("httpStatus", self.receive()["structuredContent"]["metadata"])
 
     def test_control_frame_and_fragment_deadlines(self):
         for mode in ("pings", "fragments"):

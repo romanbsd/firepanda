@@ -14,9 +14,36 @@ class Fixture(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
+        if self.path == "/http-redirect":
+            self.send_response(302)
+            self.send_header("Location", "/http-error")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         if self.path == "/slow":
             time.sleep(2)
-        if self.path == "/redirect-root":
+        if self.path == "/ready":
+            body = (b'<html><title>Ready</title><main><p id="target">Loading</p></main><script>'
+                    b'const expected="Content ready";'
+                    b'setTimeout(()=>{document.getElementById("target").innerHTML="<span id=ready>Content </span>";},120);'
+                    b'setTimeout(()=>{document.getElementById("ready").innerHTML+="<b>ready</b><a href=/two>Two</a>";},300);'
+                    b'</script></html>')
+        elif self.path == "/never":
+            body = b'<html><main>Loading</main><script>const expected="Content ready";</script></html>'
+        elif self.path == "/challenge":
+            body = b'<html><title>Just a moment...</title><main>Performing security verification</main></html>'
+        elif self.path == "/error-page":
+            body = b'<html><title>Editor</title><main>Error 500 Internal Error Return to Home</main></html>'
+        elif self.path == "/http-error":
+            body = b'<html><title>Unavailable</title><main>Please try later.</main></html>'
+        elif self.path == "/http-ok-subframe":
+            body = b'<html><main>Good document<iframe src="/http-error"></iframe></main></html>'
+        elif self.path == "/ordinary-article":
+            body = ('<html><title>HTTP troubleshooting</title><main><h1>Working with errors</h1>'
+                    '<p>Learn about CAPTCHA systems and Error 500 responses.</p>' + '<p>Helpful content.</p>' * 100 + '</main></html>').encode()
+        elif self.path == "/empty":
+            body = b'<html><main></main></html>'
+        elif self.path == "/redirect-root":
             body = b'<html><title>Redirect root</title><main><a href="/redirect">Redirect</a><a href="/two">Direct</a></main></html>'
         elif self.path == "/listing":
             body = (b'<html><head><title>Listing</title></head><body><header>Site chrome</header>'
@@ -69,7 +96,7 @@ class Fixture(http.server.BaseHTTPRequestHandler):
                     "<a href='https://outside.invalid/'>External</a>"
                     "<script>document.getElementById('dynamic').textContent='Rendered by JavaScript';</script>"
                     "</main></body></html>").encode()
-        self.send_response(200)
+        self.send_response(503 if self.path == "/http-error" else 200)
         self.send_header("Content-Type", "text/html")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()

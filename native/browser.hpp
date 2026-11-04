@@ -23,6 +23,8 @@ struct PageRequest {
   bool only_main_content = true;
   std::chrono::milliseconds timeout{30000};
   std::chrono::milliseconds wait_for{0};
+  std::string wait_for_selector;
+  std::string wait_for_text;
 };
 class Browser {
 public:

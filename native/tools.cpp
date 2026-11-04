@@ -158,8 +158,8 @@ PageRequest parse_request(const Json &args, Tool tool) {
   if (!args.is_object()) {
     throw std::invalid_argument("arguments must be an object");
   }
-  static constexpr std::array<std::string_view, 5> common{"url", "formats", "onlyMainContent",
-                                                          "timeout", "waitFor"};
+  static constexpr std::array<std::string_view, 7> common{
+      "url", "formats", "onlyMainContent", "timeout", "waitFor", "waitForSelector", "waitForText"};
   for (const auto &[key, value] : args.items()) {
     (void)value;
     if (std::find(common.begin(), common.end(), key) == common.end() &&
@@ -180,6 +180,20 @@ PageRequest parse_request(const Json &args, Tool tool) {
   }
   request.timeout = std::chrono::milliseconds(timeout_option.parse(args));
   request.wait_for = std::chrono::milliseconds(wait_option.parse(args));
+  const auto condition = [&](const char *name, size_t maximum) {
+    const auto it = args.find(name);
+    if (it == args.end()) {
+      return std::string{};
+    }
+    if (!it->is_string() || it->get_ref<const std::string &>().empty() ||
+        it->get_ref<const std::string &>().size() > maximum) {
+      throw std::invalid_argument(std::string(name) +
+                                  " must be a nonempty string within its byte limit");
+    }
+    return it->get<std::string>();
+  };
+  request.wait_for_selector = condition("waitForSelector", 2048);
+  request.wait_for_text = condition("waitForText", 4096);
   if (args.contains("formats")) {
     if (!args["formats"].is_array() || args["formats"].empty()) {
       throw std::invalid_argument("formats must be a nonempty array");
@@ -213,6 +227,18 @@ Json make_tools() {
       {"onlyMainContent", {{"type", "boolean"}, {"default", true}}},
       {"timeout", timeout_option.schema()},
       {"waitFor", wait_option.schema()}};
+  properties["waitForSelector"] = {
+      {"type", "string"},
+      {"minLength", 1},
+      {"maxLength", 2048},
+      {"description", "Wait for a CSS selector to match an element (presence, not visibility), "
+                      "within timeout. Maximum 2048 UTF-8 bytes."}};
+  properties["waitForText"] = {
+      {"type", "string"},
+      {"minLength", 1},
+      {"maxLength", 4096},
+      {"description", "Wait for literal case-sensitive body text outside scripts/styles/templates, "
+                      "within timeout. Maximum 4096 UTF-8 bytes."}};
   properties["timeout"]["description"] =
       "Total per-page budget in milliseconds, including navigation and extraction";
   properties["waitFor"]["description"] = "Extra wait after page load, within timeout";
@@ -267,7 +293,8 @@ Json execute(Browser &browser, const std::string &name, const Json &args) {
   }
   std::deque<std::pair<std::string, int>> queue{{request.url, 0}};
   std::unordered_set<std::string> queued{request.url}, discovered, visited;
-  Json pages = Json::array(), links = Json::array(), errors = Json::array();
+  Json pages = Json::array(), links = Json::array(), errors = Json::array(),
+       warnings = Json::array();
   int attempted = 0;
   size_t bytes = 0;
   bool truncated = false;
@@ -304,6 +331,9 @@ Json execute(Browser &browser, const std::string &name, const Json &args) {
       }
       // Redirected pages are returned, but an external destination is never expanded.
       const bool expand = origin(canonical) == start_origin;
+      if (tool == Tool::map && page.contains("warnings")) {
+        warnings.push_back({{"url", canonical}, {"warnings", std::move(page["warnings"])}});
+      }
       truncated = truncated || page.value("linksTruncated", false);
       if (const auto found = page.find("links"); found != page.end()) {
         for (const auto &link : *found) {
@@ -352,6 +382,9 @@ Json execute(Browser &browser, const std::string &name, const Json &args) {
   Json result{{"attempted", attempted}, {"truncated", truncated || !queue.empty()}};
   // Assignment moves the arrays; initializer-list construction would copy them.
   result["errors"] = std::move(errors);
+  if (!warnings.empty()) {
+    result["warnings"] = std::move(warnings);
+  }
   result[tool == Tool::map ? "links" : "pages"] =
       tool == Tool::map ? std::move(links) : std::move(pages);
   return result;

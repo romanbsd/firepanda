@@ -56,6 +56,26 @@ All tools require `url`. Optional `formats` defaults to `["markdown"]`;
 budget. Crawl/map accept `limit` (1–100, default 10) and `maxDepth` (0–5, default 1).
 They return `attempted`, `errors`, and `truncated` alongside `pages` or `links`.
 Total crawl work is capped at 120 seconds and result size is bounded.
+`waitForSelector` waits for a CSS selector to match an element (presence, not
+visibility); `waitForText` waits for a literal, case-sensitive body-text substring,
+excluding scripts, styles, and templates. When both are supplied, both must match.
+They run after `waitFor` and share the same per-page `timeout`, including navigation
+and extraction. These conditions apply to every page of a crawl/map; use a condition
+that also makes sense on descendant pages. Strings must be nonempty and at most
+2048 UTF-8 bytes for a selector or 4096 bytes for text. Invalid CSS and unmet
+conditions return tool/page errors. Conditions do not traverse iframes or inspect
+canvas pixels.
+
+Scraped pages include `metadata.httpStatus` only when CDP supplies an observed
+main-document response status. Unknown status is omitted; iframe responses and
+error-looking text do not establish the document's HTTP status.
+Optional `warnings` contain `{code, message}` records: `http_error` (observed 4xx/5xx),
+`suspected_block`, `suspected_error_page`, or `empty_content`. The latter three are
+heuristics/observations, not access or completeness guarantees. Content is retained
+and warnings do not set MCP `isError`. Crawl pages retain their warnings; map returns
+page receipts as `warnings: [{url, warnings: [...]}]`. A page can still be incomplete
+without a warning; prefer a readiness condition when specific content is required.
+
 Scrape returns `linksTruncated: true` when it omits links beyond the 10,000-link
 cap; crawl/map propagate omitted discovery work through `truncated`. Reaching
 exactly the cap without dropping anything is reported as complete.
