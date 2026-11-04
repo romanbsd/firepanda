@@ -18,6 +18,38 @@ class Fixture(http.server.BaseHTTPRequestHandler):
             time.sleep(2)
         if self.path == "/redirect-root":
             body = b'<html><title>Redirect root</title><main><a href="/redirect">Redirect</a><a href="/two">Direct</a></main></html>'
+        elif self.path == "/listing":
+            body = (b'<html><head><title>Listing</title></head><body><header>Site chrome</header>'
+                    b'<nav>Navigation noise</nav><section><h1>All products</h1>'
+                    b'<article><header><h2>First product</h2></header><p>First description</p></article>'
+                    b'<article><header><h2>Second product</h2></header><p>Second description</p></article>'
+                    b'</section><footer>Footer noise</footer></body></html>')
+        elif self.path == "/article-header":
+            body = (b'<html><head><title>Article</title></head><body><header>Site chrome</header>'
+                    b'<aside><article>Sidebar teaser</article></aside><article>'
+                    b'<header><h1>Article headline</h1><p>Article author</p></header>'
+                    b'<p>Article body</p></article><footer>Footer noise</footer></body></html>')
+        elif self.path == "/section-header":
+            body = (b'<html><body><header>Site chrome</header><section>'
+                    b'<header><h2>Section headline</h2></header><p>Section body</p>'
+                    b'</section></body></html>')
+        elif self.path == "/hidden-main":
+            body = (b'<html><body><section><header><h1>Visible app</h1></header>'
+                    b'<input placeholder="New item"><main id="empty"><p>Hidden empty list</p></main>'
+                    b'<main hidden>Hidden attribute</main><div role="main" aria-hidden="true">Hidden ARIA</div>'
+                    b'<main style="visibility: hidden !important">Hidden visibility</main>'
+                    b'<script>document.getElementById("empty").style.display="none";</script>'
+                    b'</section></body></html>')
+        elif self.path in ("/main-priority", "/role-main-priority"):
+            tag = 'main' if self.path == '/main-priority' else 'div role="main"'
+            end_tag = 'main' if self.path == '/main-priority' else 'div'
+            body = (f'<html><body><article>Early teaser</article><{tag}>'
+                    '<header><h1>Main headline</h1></header><p>Main body</p>'
+                    f'</{end_tag}><article>Late teaser</article></body></html>').encode()
+        elif self.path == "/anchor-without-href":
+            body = (b'<html><body><main><a id="named">Named anchor</a>'
+                    b'<a href="">Current page</a><a href="child">Relative link</a>'
+                    b'<a href="javascript:void(0)">Action</a></main></body></html>')
         elif self.path == "/code-base":
             body = (b'<html><head><title>Code</title><base href="/assets/"></head><body><main>'
                     b'<a href="child">Child</a><pre><code>first\n\n\n```literal\nlast\n</code></pre>'

@@ -63,6 +63,37 @@ def tool(name, **arguments):
 try:
     tool_list = rpc("tools/list")
     assert len(tool_list["tools"]) == 3
+    listing = tool("scrape", url=url + "/listing", formats=["markdown", "text", "html", "rawHtml"])
+    for text in ("All products", "First product", "First description", "Second product", "Second description"):
+        for format in ("markdown", "text", "html"):
+            assert text in listing[format], (format, text, listing[format])
+    for text in ("Site chrome", "Navigation noise", "Footer noise"):
+        assert text not in listing["text"], listing["text"]
+        assert text in listing["rawHtml"], listing["rawHtml"]
+    article = tool("scrape", url=url + "/article-header")
+    assert "# Article headline" in article["markdown"], article
+    assert "Article author" in article["markdown"] and "Article body" in article["markdown"], article
+    assert "Site chrome" not in article["markdown"] and "Sidebar teaser" not in article["markdown"], article
+    section = tool("scrape", url=url + "/section-header")
+    assert "## Section headline" in section["markdown"] and "Section body" in section["markdown"], section
+    assert "Site chrome" not in section["markdown"], section
+    visible = tool("scrape", url=url + "/hidden-main", formats=["markdown", "text", "html", "rawHtml"])
+    assert "# Visible app" in visible["markdown"], visible
+    assert "New item" in visible["html"], visible
+    assert "Hidden" not in visible["text"], visible
+    assert "Hidden empty list" in visible["rawHtml"], visible
+    for path in ("/main-priority", "/role-main-priority"):
+        main = tool("scrape", url=url + path)
+        assert "# Main headline" in main["markdown"] and "Main body" in main["markdown"], main
+        assert "teaser" not in main["markdown"], main
+    full = tool("scrape", url=url + "/listing", onlyMainContent=False)
+    assert "Site chrome" in full["markdown"] and "Second product" in full["markdown"], full
+    anchors = tool("scrape", url=url + "/anchor-without-href", formats=["markdown", "links"])
+    assert "Named anchor" in anchors["markdown"] and "/null" not in anchors["markdown"], anchors
+    assert f'[Current page](<{url}/anchor-without-href>)' in anchors["markdown"], anchors
+    assert f'[Relative link](<{url}/child>)' in anchors["markdown"], anchors
+    assert "javascript:" not in anchors["markdown"] and "Action" in anchors["markdown"], anchors
+    assert len(anchors["links"]) == 2, anchors
     page = tool("scrape", url=url, formats=["markdown", "text", "html", "rawHtml", "links"])
     assert "Rendered by JavaScript" in page["markdown"], page
     assert "# Native Firepanda" in page["markdown"], page

@@ -5,10 +5,24 @@
   if (options.formats.some(f => ['markdown', 'text', 'html'].includes(f))) {
     const root = document.documentElement.cloneNode(true);
     root.querySelectorAll('script,style,noscript,template,svg').forEach(e => e.remove());
+    content = root.querySelector('body') || root;
     if (options.onlyMainContent) {
-      root.querySelectorAll('nav,footer,header,aside').forEach(e => e.remove());
+      // SPAs keep inactive views in the DOM; a hidden <main> must not displace visible content.
+      root.querySelectorAll('[hidden],[aria-hidden="true"],[style]').forEach(e => {
+        const style = e.style;
+        if (e.hasAttribute('hidden') || e.getAttribute('aria-hidden') === 'true' ||
+            style?.display === 'none' || style?.visibility === 'hidden') e.remove();
+      });
+      root.querySelectorAll('nav,footer,aside').forEach(e => e.remove());
+      // Article/section headers contain headlines and bylines; only discard page chrome.
+      root.querySelectorAll('header').forEach(e => {
+        if (!e.closest('main,article,section,[role="main"]')) e.remove();
+      });
+      const main = root.querySelector('main,[role="main"]');
+      // A list of articles is a listing page, not permission to drop all but its first item.
+      const articles = root.querySelectorAll('article');
+      content = main || (articles.length === 1 && articles[0]) || content;
     }
-    content = (options.onlyMainContent && root.querySelector('main,article,[role="main"]')) || root.querySelector('body') || root;
   }
   // A deliberately small DOM-to-Markdown renderer for common article content.
   const escape = s => s.replace(/([\\`*_[\]])/g, '\\$1');
@@ -38,6 +52,8 @@
     if (/^h[1-6]$/.test(tag)) return '\n\n' + '#'.repeat(Number(tag[1])) + ' ' + body().trim() + '\n\n';
     if (tag === 'a') {
       const href = n.getAttribute('href');
+      // Named anchors are text, not relative links to a literal "null" path.
+      if (href === null) return body();
       let url = ''; try { url = new URL(href, document.baseURI || location.href).href; } catch {}
       return /^https?:/.test(url) ? '[' + body().trim() + '](<' + url.replace(/>/g, '%3E') + '>)' : body();
     }
@@ -78,7 +94,8 @@
       data.links = [];
       // Stop before allocating records for every anchor on an unusually large page.
       for (const a of document.querySelectorAll('a[href]')) {
-        const url = a.href.split('#')[0];
+        // Lightpanda can leave a.href empty for href=""; resolve that valid link to the base.
+        const url = (a.getAttribute('href') === '' ? document.baseURI || location.href : a.href).split('#')[0];
         if (!/^https?:\/\//.test(url) || seen.has(url)) continue;
         // Exactly 10,000 links is complete; flag truncation only when another is dropped.
         if (data.links.length === 10000) { data.linksTruncated = true; break; }
