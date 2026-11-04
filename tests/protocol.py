@@ -58,6 +58,7 @@ class Protocol(unittest.TestCase):
             {"url": "https://example.com", "formats": []}, {"url": "https://example.com", "unknown": True},
         ]
         out = run([request(i, "tools/call", _meta=META, name="scrape", arguments=a) for i, a in enumerate(args)])
+        self.assertEqual([x["id"] for x in out], list(range(len(args))))
         self.assertTrue(all(x["error"]["code"] == -32602 for x in out))
         out = run([request(1, "tools/call", _meta=META, name="scrape", arguments={"url": "https://example.com"})])
         self.assertTrue(out[0]["result"]["isError"])
@@ -79,11 +80,14 @@ class Protocol(unittest.TestCase):
             invalid = [v for v in values if v not in (0,)] if field in ("waitFor", "maxDepth") else values
             out = run([request(i, "tools/call", _meta=META, name="crawl", arguments={
                 "url": "https://example.com", field: v}) for i, v in enumerate(invalid)])
+            self.assertEqual([x["id"] for x in out], list(range(len(invalid))))
             self.assertTrue(all(x["error"]["code"] == -32602 for x in out), (field, out))
 
     def test_invalid_ipv6_rejected_before_browser_start(self):
+        urls = ["http://[dead]/", "http://[:::]/", "http://[1:2:3]/"]
         out = run([request(i, "tools/call", _meta=META, name="scrape", arguments={"url": url})
-                   for i, url in enumerate(["http://[dead]/", "http://[:::]/", "http://[1:2:3]/"])])
+                   for i, url in enumerate(urls)])
+        self.assertEqual([x["id"] for x in out], list(range(len(urls))))
         self.assertTrue(all(x.get("error", {}).get("code") == -32602 for x in out), out)
 
     def test_closed_stdout_exits_without_waiting_for_stdin(self):

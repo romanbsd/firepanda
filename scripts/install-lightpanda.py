@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import tempfile
 import urllib.request
 
@@ -18,7 +19,7 @@ arch = {"arm64": "aarch64", "aarch64": "aarch64", "x86_64": "x86_64", "AMD64": "
 if not system or not arch:
     parser.error("Only macOS/Linux on arm64 or x86_64 are supported")
 name = f"lightpanda-{arch}-{system}"
-if not all(c.isalnum() or c in ".-_" for c in args.release):
+if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", args.release):
     parser.error("Invalid release tag")
 
 
@@ -48,7 +49,10 @@ try:
     temporary.chmod(0o755)
     os.replace(temporary, args.output)
     manifest = {"release": args.release, "asset": name, "sha256": actual, "updated_at": asset["updated_at"]}
-    args.output.with_suffix(".json").write_text(json.dumps(manifest, indent=2) + "\n")
+    # Append to the full name: replacing a suffix can collide with the binary
+    # itself (e.g. --output lightpanda.json) or with another versioned install.
+    manifest_path = args.output.parent / (args.output.name + ".json")
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
     print(f"Installed {args.output}\nSHA-256: {actual}")
 finally:
     if temporary is not None:

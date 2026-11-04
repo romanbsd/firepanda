@@ -133,3 +133,18 @@ Third-pass evidence is retained as `build/evidence/normal-pass3.txt`,
 `sanitizers-pass3.txt`, `threadsanitizer-pass3.txt`, and `macos-leaks-pass3.txt`,
 plus `analyzer-main-pass3.txt` and `analyzer-tools-pass3.txt` (empty diagnostics).
 The separate prebuilt Lightpanda binary remains outside sanitizer coverage.
+
+## OCR finding validation
+
+The initial committed-range OCR pass identified installer, CI, and test-harness
+issues. The resulting fix batch adds explicit read-only CI token permissions,
+job/concurrency bounds, a stable `1.0.2` browser pin, root-anchored build ignores,
+non-colliding installer sidecars, release-tag validation, complete-response
+assertions, and client wait budgets that cover the full crawl deadline.
+
+Stable Lightpanda `1.0.2` was downloaded through the SHA-256-checking installer;
+its help includes Unix sockets and the macOS integration suite passed. All five
+normal test groups (including the new offline installer tests) passed against
+that release. This does not establish Linux CI success or complete OCR coverage.
+No C++ runtime code changed in this fix batch, so the earlier sanitizer evidence
+is retained separately from these installer/CI/harness checks.

@@ -1,5 +1,10 @@
 name: Native MCP
 on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   native:
     strategy:
@@ -7,17 +12,19 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
-      - run: python3 scripts/install-lightpanda.py
+      - run: python3 scripts/install-lightpanda.py --release 1.0.2
       - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DFIREPANDA_TEST_LIGHTPANDA="$PWD/.local/bin/lightpanda"
       - run: cmake --build build --parallel 2
       - run: ctest --test-dir build --output-on-failure
   sanitizers:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     env:
       ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
       UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
@@ -26,7 +33,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
-      - run: python3 scripts/install-lightpanda.py
+      - run: python3 scripts/install-lightpanda.py --release 1.0.2
       - run: cmake -S . -B build-sanitize -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_BUILD_TYPE=Debug -DFIREPANDA_SANITIZERS=ON -DFIREPANDA_TEST_LIGHTPANDA="$PWD/.local/bin/lightpanda"
       - run: cmake --build build-sanitize --parallel 2
       - run: ctest --test-dir build-sanitize --output-on-failure

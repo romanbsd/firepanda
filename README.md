@@ -25,9 +25,11 @@ Lightpanda starts when the first browser tool is called, stays alive for reuse,
 and shuts down when stdin closes. No HTTP listening port is needed.
 
 The installer checks the upstream asset's SHA-256 and writes a manifest beside
-the binary. Its default `nightly` release is mutable: keep the downloaded binary
+the binary by appending `.json` to its full filename. Its default `nightly` release is mutable: keep the downloaded binary
 and manifest for reproducible runtime deployments. A release tag can be selected
 with `--release TAG`. It supports arm64 and x86_64 assets on macOS/Linux.
+CI explicitly installs release `1.0.2`, whose Unix-socket integration was tested
+locally on macOS; its Linux CI validation remains separate.
 
 Add this to your MCP client's configuration, replacing both absolute paths:
 

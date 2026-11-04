@@ -44,7 +44,9 @@ def rpc(method, **params):
     process.stdin.flush()
     with selectors.DefaultSelector() as sel:
         sel.register(process.stdout, selectors.EVENT_READ)
-        seconds = min(125, params.get("arguments", {}).get("timeout", 30000) / 1000 + 10)
+        seconds = params.get("arguments", {}).get("timeout", 30000) / 1000 + 10
+        if method == "tools/call" and params.get("name") in ("crawl", "map"):
+            seconds = max(seconds, 130)  # fixed 120-second crawl budget plus transport slack
         assert sel.select(seconds), "Service did not answer within its test budget"
     response = json.loads(process.stdout.readline())
     assert response["id"] == sequence, response
