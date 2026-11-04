@@ -1,0 +1,32 @@
+name: Native MCP
+on: [push, pull_request, workflow_dispatch]
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: python3 scripts/install-lightpanda.py
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DFIREPANDA_TEST_LIGHTPANDA="$PWD/.local/bin/lightpanda"
+      - run: cmake --build build --parallel 2
+      - run: ctest --test-dir build --output-on-failure
+  sanitizers:
+    runs-on: ubuntu-latest
+    env:
+      ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: python3 scripts/install-lightpanda.py
+      - run: cmake -S . -B build-sanitize -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_BUILD_TYPE=Debug -DFIREPANDA_SANITIZERS=ON -DFIREPANDA_TEST_LIGHTPANDA="$PWD/.local/bin/lightpanda"
+      - run: cmake --build build-sanitize --parallel 2
+      - run: ctest --test-dir build-sanitize --output-on-failure
