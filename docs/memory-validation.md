@@ -1,5 +1,8 @@
 # Native C++ review and memory validation
 
+This is a historical validation record. See the current README and CI for the
+latest test groups; historical binary sizes and counts below describe earlier builds.
+
 Validated locally on 2026-11-04, macOS arm64. The regular Release build uses
 AppleClang 21; the sanitizer Debug build uses Homebrew Clang 23.1.4.
 
@@ -12,7 +15,8 @@ AppleClang 21; the sanitizer Debug build uses Homebrew Clang 23.1.4.
 - CDP retains only the active session's page-load flag, replacing a queue of
   up to 256 arbitrary JSON event bodies and repeated queue scans.
 - Large JSON results move through the browser/tool/MCP layers instead of being
-  copied through JSON initializer lists. Structured and text MCP outputs still
+  unnecessarily copied between layers. The pinned JSON library also moves
+  rvalues through initializer lists; explicit assignments are not required to avoid copies. Structured and text MCP outputs still
   duplicate the payload on the wire for client compatibility.
 - URL normalization uses bounded scans and `from_chars`, removing recursive
   regex matching. JSON nesting is limited to 64 on both MCP and CDP input.
@@ -148,3 +152,18 @@ normal test groups (including the new offline installer tests) passed against
 that release. This does not establish Linux CI success or complete OCR coverage.
 No C++ runtime code changed in this fix batch, so the earlier sanitizer evidence
 is retained separately from these installer/CI/harness checks.
+
+## November 5 validation
+
+Subsequent normal and ASan/UBSan/LeakSanitizer runs passed six groups: protocol,
+installer, CDP transport, native browser, JSON size boundaries, and memory stress.
+Stable Lightpanda 1.0.2 and the locally installed nightly both passed browser
+integration, including idle expiry, failure cleanup, external ownership, readiness
+cache invalidation, body replacement, and fallback when MutationObserver is absent.
+The release-preparation change adds an offline dependency-updater test group.
+No remote Linux or GitHub Actions result is implied by these local macOS results.
+
+The release-preparation build using cpp-httplib v0.64.0 and nlohmann/json v3.12.0
+passed all seven current groups normally and under ASan/UBSan/LeakSanitizer on
+macOS arm64 with stable Lightpanda 1.0.2. Workflow YAML passed actionlint locally;
+no remote workflow result is claimed.

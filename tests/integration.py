@@ -24,11 +24,15 @@ process = subprocess.Popen([binary, "--lightpanda", lightpanda], stdin=subproces
 sequence = 0
 
 
-def child():
+def children():
     """Inspect only the service's direct child; do not infer global orphans."""
     rows = subprocess.check_output(["ps", "-axo", "pid=,ppid="], text=True)
-    pids = [int(pid) for pid, ppid in (line.split() for line in rows.splitlines())
+    return [int(pid) for pid, ppid in (line.split() for line in rows.splitlines())
             if int(ppid) == process.pid]
+
+
+def child():
+    pids = children()
     assert len(pids) == 1, pids
     command = subprocess.check_output(["ps", "-p", str(pids[0]), "-o", "command="], text=True)
     args = shlex.split(command)
@@ -66,6 +70,14 @@ try:
     ready = tool("scrape", url=url + "/ready", waitForSelector="#ready", waitForText="Content ready", timeout=3000)
     assert "**ready**" in ready["markdown"], ready
     assert ready["metadata"]["httpStatus"] == 200, ready
+    for path, phrase in (('/ready-character-data', 'Character ready'),
+                         ('/ready-body-replacement', 'Replacement ready'),
+                         ('/ready-no-observer', 'Content ready')):
+        changed = tool('scrape', url=url + path, waitForText=phrase, formats=['text'], timeout=3000)
+        assert phrase in changed['text'], changed
+    state = tool('scrape', url=url + '/ready-selector-state', waitForText='Stable text',
+                 waitForSelector='#target:checked', timeout=3000)
+    assert 'Stable text' in state['markdown'], state
     for arguments in ({"waitForText": "Content ready"}, {"waitForSelector": "#absent"}, {"waitForSelector": "["}):
         failed = rpc("tools/call", name="scrape", arguments={"url": url + "/never", "timeout": 350, **arguments})
         assert failed["isError"], (arguments, failed)
@@ -131,6 +143,15 @@ try:
     assert url + "/assets/child" in extracted["markdown"], extracted["markdown"]
     assert "first\n\n\n```literal\nlast\n" in extracted["markdown"], extracted["markdown"]
     assert "``value`inside``" in extracted["markdown"], extracted["markdown"]
+    assert f'[Fragment](<{url}/assets/#part>)' in extracted["markdown"], extracted
+    assert {link['url'] for link in extracted['links']} == {url + '/assets/', url + '/assets/child'}, extracted
+    assert 'Invalid' in extracted['markdown'] and 'mailto:' not in extracted['markdown'], extracted
+    wide = tool("crawl", url=url + "/wide-frontier", limit=100, maxDepth=1)
+    assert not wide['errors'] and wide['attempted'] == 100 and wide['truncated'], wide
+    assert [page['metadata']['url'] for page in wide['pages'][1:]] == [url + f'/leaf/{i}' for i in range(99)], wide
+    budget = tool("crawl", url=url + "/budget-root", formats=['text'], limit=2, maxDepth=1)
+    assert not budget['errors'] and budget['truncated'] and budget['attempted'] == 2, budget.keys()
+    assert len(budget['pages']) == 1 and len(budget['pages'][0]['text']) > 2 * 1024 * 1024, budget.keys()
     redirects = tool("crawl", url=url + "/redirect-root", limit=5, maxDepth=1)
     assert not redirects["errors"], redirects["errors"]
     assert redirects["attempted"] == 2 and len(redirects["pages"]) == 2, redirects
@@ -155,6 +176,8 @@ try:
     assert child()[0] == first_child, "Browser must be reused between calls"
     failure = rpc("tools/call", name="scrape", arguments={"url": url + "/slow", "timeout": 100})
     assert failure["isError"], failure
+    assert not children(), "Failed scrape must reap its owned browser"
+    assert not os.path.exists(os.path.dirname(socket_path)), "Failed scrape left its socket directory"
     recovered = tool("scrape", url=url)
     assert "Rendered by JavaScript" in recovered["markdown"]
     final_child, socket_path = child()
@@ -177,7 +200,58 @@ except ProcessLookupError:
 else:
     raise AssertionError("Native Lightpanda child survived EOF")
 
-# An independently managed browser must survive Firepanda shutdown.
+# The MCP service remains available after its lazily started browser goes idle.
+process = subprocess.Popen([binary, "--lightpanda", lightpanda, "--idle-timeout", "1"],
+                           stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
+try:
+    assert len(rpc("tools/list")["tools"]) == 3
+    assert not children(), "Tool discovery must not launch the browser"
+    tool("scrape", url=url)
+    idle_pid, idle_socket = child()
+    # No further MCP input: pselect must wake at the idle deadline itself.
+    until = time.monotonic() + 4
+    while children() and time.monotonic() < until:
+        time.sleep(0.05)
+    assert not children(), "Idle browser was not stopped and reaped"
+    assert not os.path.exists(os.path.dirname(idle_socket)), "Idle socket directory leaked"
+    assert process.poll() is None, "Idle shutdown must keep the MCP service running"
+    rpc("ping")
+    assert not children(), "Ping must not relaunch the browser"
+    tool("scrape", url=url)
+    active_pid, _ = child()
+    assert active_pid != idle_pid, "Next browser operation must cold-start a new child"
+    tool("scrape", url=url, waitFor=1300, timeout=10000)
+    assert child()[0] == active_pid, "Idle timeout interrupted an active request"
+    time.sleep(0.6)
+    tool("scrape", url=url)
+    time.sleep(0.6)
+    assert child()[0] == active_pid, "Browser activity did not renew the idle deadline"
+    # Continuous non-browser MCP activity must not indefinitely defer expiration.
+    until = time.monotonic() + 4
+    while children() and time.monotonic() < until:
+        rpc("ping")
+        rpc("tools/list")
+        time.sleep(0.05)
+    assert not children(), "MCP housekeeping kept the browser alive"
+finally:
+    process.stdin.close()
+    process.wait(timeout=10)
+assert process.returncode == 0
+
+process = subprocess.Popen([binary, "--lightpanda", lightpanda, "--idle-timeout", "0"],
+                           stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
+try:
+    tool("scrape", url=url)
+    warm_pid, _ = child()
+    time.sleep(1.3)
+    assert child()[0] == warm_pid, "Disabled idle timeout stopped the browser"
+finally:
+    process.stdin.close()
+    process.wait(timeout=10)
+assert process.returncode == 0
+print("PASS: lazy launch, quiet/active MCP idle expiry, restart, active-request protection, deadline renewal, disable")
+
+# An independently managed browser must survive idle timeouts and Firepanda shutdown.
 with tempfile.TemporaryDirectory(prefix="firepanda-external-", dir="/tmp") as directory:
     sock = directory + "/cdp.sock"
     external = subprocess.Popen([lightpanda, "serve", "--unix-socket", sock, "--log-level", "error"])
@@ -187,10 +261,16 @@ with tempfile.TemporaryDirectory(prefix="firepanda-external-", dir="/tmp") as di
                 break
             assert external.poll() is None, "External browser exited"
             time.sleep(0.01)
-        process = subprocess.Popen([binary, "--socket", sock], stdin=subprocess.PIPE,
+        process = subprocess.Popen([binary, "--socket", sock, "--idle-timeout", "1"], stdin=subprocess.PIPE,
                                    stdout=subprocess.PIPE, text=True, bufsize=1)
         try:
             assert len(rpc("tools/list")["tools"]) == 3
+            assert "Rendered by JavaScript" in tool("scrape", url=url)["markdown"]
+            time.sleep(1.3)
+            assert external.poll() is None, "Idle timeout terminated an external browser"
+            failed = rpc("tools/call", name="scrape", arguments={"url": url + "/slow", "timeout": 100})
+            assert failed["isError"] and external.poll() is None, failed
+            assert os.path.exists(sock), "Failure cleanup removed an external socket"
             assert "Rendered by JavaScript" in tool("scrape", url=url)["markdown"]
         finally:
             process.stdin.close()

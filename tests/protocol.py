@@ -28,6 +28,22 @@ def run(messages):
 
 
 class Protocol(unittest.TestCase):
+    def test_version_matches_mcp_identity(self):
+        cli = subprocess.run([BINARY, "--version"], capture_output=True, text=True, timeout=5, check=True)
+        version = cli.stdout.strip().split()[1]
+        response = run([request(1, "initialize", protocolVersion="2025-11-25", capabilities={},
+                                clientInfo={"name": "test", "version": "1"})])[0]
+        self.assertEqual(response['result']['serverInfo']['version'], version)
+
+    def test_idle_timeout_cli_validation(self):
+        for value in ("", "+1", "-1", "1.5", " 1", "1 ", "nan", "86401", str(2**64)):
+            result = subprocess.run([BINARY, "--idle-timeout", value], capture_output=True, text=True, timeout=5)
+            self.assertEqual(result.returncode, 2, (value, result))
+        for value in ("0", "1", "60", "86400"):
+            result = subprocess.run([BINARY, "--idle-timeout", value], input="", capture_output=True, text=True, timeout=5)
+            self.assertEqual(result.returncode, 0, (value, result))
+        self.assertEqual(subprocess.run([BINARY, "--idle-timeout"], capture_output=True, timeout=5).returncode, 2)
+
     def test_modern_stateless_and_legacy(self):
         out = run([
             request(1, "tools/list", _meta=META),

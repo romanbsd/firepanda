@@ -22,12 +22,26 @@ class Fixture(http.server.BaseHTTPRequestHandler):
             return
         if self.path == "/slow":
             time.sleep(2)
-        if self.path == "/ready":
+        if self.path in ("/ready", "/ready-no-observer"):
             body = (b'<html><title>Ready</title><main><p id="target">Loading</p></main><script>'
                     b'const expected="Content ready";'
                     b'setTimeout(()=>{document.getElementById("target").innerHTML="<span id=ready>Content </span>";},120);'
                     b'setTimeout(()=>{document.getElementById("ready").innerHTML+="<b>ready</b><a href=/two>Two</a>";},300);'
                     b'</script></html>')
+            if self.path == '/ready-no-observer':
+                body = body.replace(b'<script>', b'<script>globalThis.MutationObserver=undefined;', 1)
+        elif self.path == '/ready-character-data':
+            body = (b'<html><body><main><p id="target">Loading</p></main><script>'
+                    b'setTimeout(()=>{document.getElementById("target").firstChild.data="Character ready";},120);'
+                    b'</script></body></html>')
+        elif self.path == '/ready-body-replacement':
+            body = (b'<html><body><main>Loading</main><script>'
+                    b'setTimeout(()=>{document.body.innerHTML="<main>Replacement ready</main>";},120);'
+                    b'</script></body></html>')
+        elif self.path == '/ready-selector-state':
+            body = (b'<html><body><main>Stable text<input id="target" type="checkbox"></main><script>'
+                    b'setTimeout(()=>{document.getElementById("target").checked=true;},120);'
+                    b'</script></body></html>')
         elif self.path == "/never":
             body = b'<html><main>Loading</main><script>const expected="Content ready";</script></html>'
         elif self.path == "/challenge":
@@ -79,8 +93,19 @@ class Fixture(http.server.BaseHTTPRequestHandler):
                     b'<a href="javascript:void(0)">Action</a></main></body></html>')
         elif self.path == "/code-base":
             body = (b'<html><head><title>Code</title><base href="/assets/"></head><body><main>'
-                    b'<a href="child">Child</a><pre><code>first\n\n\n```literal\nlast\n</code></pre>'
+                    b'<a href="child">Child</a><a href="">Base</a><a href="#part">Fragment</a>'
+                    b'<a href="http://[invalid">Invalid</a><a href="mailto:test@example.com">Mail</a>'
+                    b'<pre><code>first\n\n\n```literal\nlast\n</code></pre>'
                     b'<code>value`inside</code></main></body></html>')
+        elif self.path == "/wide-frontier":
+            # Force unordered_set rehash while queue entries still reference its keys.
+            body = ('<html><main>' + ''.join(
+                f'<a href="/leaf/{i}">Leaf {i}</a>' for i in range(300)) + '</main></html>').encode()
+        elif self.path.startswith('/leaf/'):
+            body = f'<html><main>{self.path}</main></html>'.encode()
+        elif self.path in ('/budget-root', '/budget-leaf'):
+            body = ('<html><main>' + 'x' * (2 * 1024 * 1024) +
+                    '<a href="/budget-leaf">Next</a></main></html>').encode()
         elif self.path in ("/links-exact", "/links-overflow"):
             count = 10000 if self.path == "/links-exact" else 10001
             body = ("<html><title>Links</title><main>" +

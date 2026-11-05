@@ -1,11 +1,13 @@
 #include "browser.hpp"
 #include <algorithm>
 #include <cerrno>
+#include <charconv>
 #include <csignal>
 #include <cstring>
 #include <iostream>
 #include <optional>
 #include <pthread.h>
+#include <string_view>
 #include <sys/select.h>
 #include <unistd.h>
 
@@ -15,7 +17,7 @@ void interrupt(int) {
   firepanda::stop_requested = 1;
 }
 
-bool wait_for_input() {
+bool wait_for_input(std::optional<std::chrono::steady_clock::time_point> idle_deadline) {
   sigset_t stopping, previous;
   sigemptyset(&stopping);
   sigaddset(&stopping, SIGTERM);
@@ -26,11 +28,21 @@ bool wait_for_input() {
   fd_set readable;
   FD_ZERO(&readable);
   FD_SET(STDIN_FILENO, &readable);
+  timespec timeout{};
+  if (idle_deadline) {
+    const auto remaining = std::max(std::chrono::nanoseconds::zero(),
+                                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                        *idle_deadline - std::chrono::steady_clock::now()));
+    const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(remaining);
+    timeout.tv_sec = seconds.count();
+    timeout.tv_nsec = (remaining - seconds).count();
+  }
   // pselect atomically unmasks signals while waiting. Otherwise SIGTERM between
   // checking stop_requested and entering read() could leave an idle server stuck.
-  const int ready = firepanda::stop_requested ? 0
-                                              : pselect(STDIN_FILENO + 1, &readable, nullptr,
-                                                        nullptr, nullptr, &previous);
+  const int ready = firepanda::stop_requested
+                        ? 0
+                        : pselect(STDIN_FILENO + 1, &readable, nullptr, nullptr,
+                                  idle_deadline ? &timeout : nullptr, &previous);
   const int wait_error = errno;
   if (const int error = pthread_sigmask(SIG_SETMASK, &previous, nullptr)) {
     throw std::runtime_error("Cannot restore shutdown signals: " +
@@ -44,7 +56,7 @@ bool wait_for_input() {
 constexpr const char *version_key = "io.modelcontextprotocol/protocolVersion";
 const Json versions =
     Json::array({"2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"});
-const Json identity{{"name", "firepanda"}, {"version", "0.2.0"}};
+const Json identity{{"name", "firepanda"}, {"version", FIREPANDA_VERSION}};
 Json error(Json id, int code, const std::string &message) {
   return {
       {"jsonrpc", "2.0"}, {"id", std::move(id)}, {"error", {{"code", code}, {"message", message}}}};
@@ -55,6 +67,12 @@ class Server {
 
 public:
   explicit Server(firepanda::Options options) : browser_(std::move(options)) {}
+  auto idle_deadline() const {
+    return browser_.idle_deadline();
+  }
+  void stop_idle_browser() {
+    browser_.stop_if_idle();
+  }
   std::optional<Json> handle(const Json &r) {
     Json id = r.is_object() ? r.value("id", Json(nullptr)) : Json(nullptr);
     if (!r.is_object() || r.value("jsonrpc", Json()) != "2.0" || !r.contains("method") ||
@@ -124,8 +142,7 @@ public:
               throw std::runtime_error(
                   "Tool result exceeds 8 MiB; select fewer output formats or pages");
             }
-            // Build large values by assignment: JSON initializer lists copy their elements,
-            // even when those elements are written as std::move(...).
+            // Transfer the large text and structured payloads into the response.
             result = Json::object();
             Json content{{"type", "text"}};
             content["text"] = std::move(text);
@@ -163,12 +180,26 @@ int main(int argc, char **argv) {
     const std::string arg = argv[i];
     if (arg == "--help") {
       std::cout << "firepanda [--lightpanda /path/to/lightpanda | --socket /absolute/cdp.sock]\n"
+                   "          [--idle-timeout SECONDS]\n"
+                   "Managed browser idle timeout: 60 seconds by default; 0 disables it.\n"
                    "MCP over stdio; starts native Lightpanda lazily unless --socket is given.\n";
       return 0;
     }
     if (arg == "--version") {
-      std::cout << "firepanda 0.2.0\n";
+      std::cout << "firepanda " << FIREPANDA_VERSION << '\n';
       return 0;
+    }
+    if (arg == "--idle-timeout" && i + 1 < argc) {
+      const std::string_view value(argv[++i]);
+      unsigned seconds = 0;
+      const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), seconds);
+      if (value.empty() || error != std::errc{} || end != value.data() + value.size() ||
+          seconds > 86400) {
+        std::cerr << "--idle-timeout must be an integer from 0 to 86400 seconds\n";
+        return 2;
+      }
+      options.idle_timeout = std::chrono::seconds(seconds);
+      continue;
     }
     if ((arg == "--lightpanda" || arg == "--socket") && i + 1 < argc) {
       if (arg == "--lightpanda") {
@@ -198,7 +229,8 @@ int main(int argc, char **argv) {
     // Buffered reads keep stdio cheap while bounding memory before JSON parsing.
     char buffer[8192];
     while (!firepanda::stop_requested) {
-      if (!wait_for_input()) {
+      server.stop_idle_browser();
+      if (!wait_for_input(server.idle_deadline())) {
         continue;
       }
       const auto count = read(STDIN_FILENO, buffer, sizeof(buffer));
@@ -220,6 +252,9 @@ int main(int argc, char **argv) {
           continue;
         }
         std::optional<Json> response;
+        // Also expire during a stream of buffered pings/notifications; MCP traffic
+        // alone must not keep the browser alive. Tool execution remains synchronous.
+        server.stop_idle_browser();
         if (oversized) {
           response = error(nullptr, -32600, "Request exceeds 1 MiB");
         } else {

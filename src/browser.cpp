@@ -120,17 +120,25 @@ struct Browser::Impl {
   uint64_t next_id = 0;
   std::string active_session;
   bool page_loaded = false;
+  std::optional<Clock::time_point> idle_since;
   std::string main_frame;
   std::optional<int> http_status;
   std::vector<std::pair<std::string, int>> early_document_statuses;
   const bool owns_process;
   explicit Impl(Options o) : options(std::move(o)), owns_process(options.socket.empty()) {}
   ~Impl() {
+    release();
+  }
+  void release() {
     ws.reset();
+    socket_descriptor = -1;
     stop_child();
+    idle_since.reset();
     if (!directory.empty()) {
       std::error_code ec;
       std::filesystem::remove_all(directory, ec);
+      directory.clear();
+      options.socket.clear();
     }
   }
   void stop_child() {
@@ -357,8 +365,23 @@ struct Browser::Impl {
 
 Browser::Browser(Options o) : impl_(std::make_unique<Impl>(std::move(o))) {}
 Browser::~Browser() = default;
+std::optional<Clock::time_point> Browser::idle_deadline() const {
+  const auto &b = *impl_;
+  if (!b.managed() || b.pid <= 0 || !b.idle_since || b.options.idle_timeout.count() == 0) {
+    return std::nullopt;
+  }
+  return *b.idle_since + b.options.idle_timeout;
+}
+void Browser::stop_if_idle() {
+  const auto deadline = idle_deadline();
+  if (deadline && Clock::now() >= *deadline) {
+    // Called only between requests on the service thread, never during active CDP work.
+    impl_->release();
+  }
+}
 Json Browser::scrape(const PageRequest &request) {
   auto &b = *impl_;
+  b.idle_since.reset();
   const auto deadline = Clock::now() + request.timeout;
   try {
     // httplib's timeout is per read. Continuous control frames or fragments can
@@ -412,6 +435,7 @@ Json Browser::scrape(const PageRequest &request) {
       std::this_thread::sleep_until(std::min(wait_end, Clock::now() + 50ms));
     }
     Json extraction{
+        {"maxLinks", max_links},
         {"formats", request.formats},
         {"onlyMainContent", request.only_main_content},
         {"waitForSelector", request.wait_for_selector},
@@ -439,7 +463,7 @@ Json Browser::scrape(const PageRequest &request) {
       }
     }
     if (const auto links = result.find("links"); links != result.end()) {
-      if (!links->is_array() || links->size() > 10000) {
+      if (!links->is_array() || links->size() > max_links) {
         throw std::runtime_error("Invalid extraction links");
       }
       for (const auto &link : *links) {
@@ -479,14 +503,12 @@ Json Browser::scrape(const PageRequest &request) {
       }
     }
     b.call("Target.disposeBrowserContext", {{"browserContextId", context}}, "", deadline);
+    b.idle_since = Clock::now(); // Inactivity starts after work completes, not when it starts.
     return result;
   } catch (...) {
     // disposeOnDetach releases this operation's context even if its CDP stream
     // is unusable. Sending another command on a failed stream can hang cleanup.
-    b.ws.reset(); // a timeout must not leave late replies on the next operation
-    if (b.managed()) {
-      b.stop_child(); // reset the browser after an interrupted page
-    }
+    b.release(); // Close late replies and remove owned resources; external sockets stay intact.
     throw;
   }
 }

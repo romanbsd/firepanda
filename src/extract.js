@@ -18,20 +18,38 @@
     return false;
   };
   if (options.waitForSelector || options.waitForText) {
-    const ready = () => (!options.waitForSelector || document.querySelector(options.waitForSelector)) &&
-      (!options.waitForText || hasText(options.waitForText));
+    let textDirty = true, textReady = false;
+    // Watch the document root so replacing <body> also invalidates the cache.
+    // Selectors still poll: property changes such as :checked need not mutate attributes.
+    const observer = options.waitForText && typeof MutationObserver === 'function' ?
+      new MutationObserver(() => { textDirty = true; }) : null;
+    const ready = () => {
+      if (options.waitForSelector && !document.querySelector(options.waitForSelector)) return false;
+      if (!options.waitForText) return true;
+      if (!observer || textDirty) {
+        textReady = hasText(options.waitForText);
+        textDirty = false;
+      }
+      return textReady;
+    };
     // Validate selector syntax before scheduling timers. Both conditions must hold together.
     if (options.waitForSelector) document.querySelector(options.waitForSelector);
     const end = Date.now() + options.readyTimeout;
-    // Poll in the page, keeping this wait and extraction to one CDP round trip.
-    while (!ready()) {
-      if (Date.now() >= end) throw new Error('Content readiness timed out');
-      await new Promise(resolve => setTimeout(resolve, Math.min(50, Math.max(1, end - Date.now()))));
+    try {
+      observer?.observe(document.documentElement, {subtree:true, childList:true, characterData:true});
+      // Poll in the page, keeping this wait and extraction to one CDP round trip.
+      while (!ready()) {
+        if (Date.now() >= end) throw new Error('Content readiness timed out');
+        await new Promise(resolve => setTimeout(resolve, Math.min(50, Math.max(1, end - Date.now()))));
+      }
+    } finally {
+      observer?.disconnect();
     }
   }
   let content;
+  const projected = options.formats.filter(f => ['markdown', 'text', 'html'].includes(f));
   // Map and rawHtml-only requests do not need a second DOM tree at all.
-  if (options.formats.some(f => ['markdown', 'text', 'html'].includes(f))) {
+  if (projected.length) {
     const root = document.documentElement.cloneNode(true);
     root.querySelectorAll('script,style,noscript,template,svg').forEach(e => e.remove());
     content = root.querySelector('body') || root;
@@ -55,6 +73,16 @@
   }
   // A deliberately small DOM-to-Markdown renderer for common article content.
   const escape = s => s.replace(/([\\`*_[\]])/g, '\\$1');
+  const base = document.baseURI || location.href;
+  const linkURL = anchor => {
+    const href = anchor.getAttribute('href');
+    // Named anchors are plain text; an empty href is a valid link to the base.
+    if (href === null) return '';
+    try {
+      const url = new URL(href, base);
+      return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : '';
+    } catch { return ''; }
+  };
   const ticks = (text, minimum) => {
     let length = minimum;
     for (const run of text.matchAll(/`+/g)) length = Math.max(length, run[0].length + 1);
@@ -64,7 +92,11 @@
     if (n.nodeType === 3) return escape((n.textContent || '').replace(/\s+/g, ' '));
     if (n.nodeType !== 1) return '';
     const tag = n.tagName.toLowerCase();
-    const body = () => Array.from(n.childNodes).map(render).join('');
+    const body = () => {
+      let text = '';
+      for (const child of n.childNodes) text += render(child);
+      return text;
+    };
     if (tag === 'pre') {
       const text = n.textContent.replace(/\r\n?/g, '\n');
       // Choose a fence longer than any literal backtick run; never alter code to fit it.
@@ -80,11 +112,8 @@
     }
     if (/^h[1-6]$/.test(tag)) return '\n\n' + '#'.repeat(Number(tag[1])) + ' ' + body().trim() + '\n\n';
     if (tag === 'a') {
-      const href = n.getAttribute('href');
-      // Named anchors are text, not relative links to a literal "null" path.
-      if (href === null) return body();
-      let url = ''; try { url = new URL(href, document.baseURI || location.href).href; } catch {}
-      return /^https?:/.test(url) ? '[' + body().trim() + '](<' + url.replace(/>/g, '%3E') + '>)' : body();
+      const url = linkURL(n);
+      return url ? '[' + body().trim() + '](<' + url.replace(/>/g, '%3E') + '>)' : body();
     }
     if (tag === 'strong' || tag === 'b') return '**' + body() + '**';
     if (tag === 'em' || tag === 'i') return '*' + body() + '*';
@@ -123,11 +152,11 @@
       data.links = [];
       // Stop before allocating records for every anchor on an unusually large page.
       for (const a of document.querySelectorAll('a[href]')) {
-        // Lightpanda can leave a.href empty for href=""; resolve that valid link to the base.
-        const url = (a.getAttribute('href') === '' ? document.baseURI || location.href : a.href).split('#')[0];
-        if (!/^https?:\/\//.test(url) || seen.has(url)) continue;
+        // Discovery deduplicates documents; Markdown retains in-page fragments.
+        const url = linkURL(a).split('#')[0];
+        if (!url || seen.has(url)) continue;
         // Exactly 10,000 links is complete; flag truncation only when another is dropped.
-        if (data.links.length === 10000) { data.linksTruncated = true; break; }
+        if (data.links.length === options.maxLinks) { data.linksTruncated = true; break; }
         seen.add(url);
         data.links.push({url, title:(a.textContent || '').trim()});
       }
@@ -158,7 +187,6 @@
       (short && /^(?:error\s+)?[45]\d\d\b/.test(sample))) {
     warn('suspected_error_page', 'The page appears to be an error document; this is a content heuristic.');
   }
-  const projected = options.formats.filter(f => ['markdown', 'text', 'html'].includes(f));
   if ((projected.length && projected.every(f => !data[f].trim())) ||
       (!projected.length && options.formats.includes('links') && !data.links.length)) {
     warn('empty_content', 'The requested content is empty; a readiness condition may be needed.');

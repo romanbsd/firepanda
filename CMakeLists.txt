@@ -5,13 +5,15 @@ if(NOT UNIX)
 endif()
 include(FetchContent)
 include(CTest)
+include(GNUInstallDirs)
 find_package(Threads REQUIRED)
 
-# Header-only dependencies, pinned and hash checked. TLS and compression belong
+# Header-only dependencies pinned to release tags. TLS and compression belong
 # to Lightpanda; the local CDP connection needs neither.
 FetchContent_Declare(httplib
-  URL https://github.com/yhirose/cpp-httplib/archive/453b1b8613a591a16d0291721a7ebdd64d4b01e9.tar.gz
-  URL_HASH SHA256=b16beb3739ec4bbb5d245cf6be73bc020980ea4ae70cab96e99a1977948bb917)
+  GIT_REPOSITORY https://github.com/yhirose/cpp-httplib.git
+  GIT_TAG v0.64.0
+  GIT_SHALLOW TRUE)
 set(HTTPLIB_REQUIRE_OPENSSL OFF CACHE BOOL "" FORCE)
 set(HTTPLIB_USE_OPENSSL_IF_AVAILABLE OFF CACHE BOOL "" FORCE)
 set(HTTPLIB_USE_ZLIB_IF_AVAILABLE OFF CACHE BOOL "" FORCE)
@@ -19,34 +21,41 @@ set(HTTPLIB_USE_BROTLI_IF_AVAILABLE OFF CACHE BOOL "" FORCE)
 set(HTTPLIB_USE_ZSTD_IF_AVAILABLE OFF CACHE BOOL "" FORCE)
 set(HTTPLIB_INSTALL OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(json
-  URL https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz
-  URL_HASH SHA256=42f6e95cad6ec532fd372391373363b62a14af6d771056dbfc86160e6dfff7aa)
+  GIT_REPOSITORY https://github.com/nlohmann/json.git
+  GIT_TAG v3.12.0
+  GIT_SHALLOW TRUE)
 set(JSON_BuildTests OFF CACHE BOOL "" FORCE)
 set(JSON_Install OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(httplib json)
 
-file(READ "${CMAKE_CURRENT_SOURCE_DIR}/native/extract.js" FIREPANDA_EXTRACTION_JS)
-configure_file(native/extraction.hpp.in generated/extraction.hpp @ONLY)
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS native/extract.js)
-add_executable(firepanda native/main.cpp native/browser.cpp native/tools.cpp)
-target_compile_features(firepanda PRIVATE cxx_std_20)
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/src/extract.js" FIREPANDA_EXTRACTION_JS)
+configure_file(src/extraction.hpp.in generated/extraction.hpp @ONLY)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS src/extract.js)
+add_executable(firepanda src/main.cpp src/browser.cpp src/tools.cpp)
+target_compile_definitions(firepanda PRIVATE FIREPANDA_VERSION="${PROJECT_VERSION}")
 target_include_directories(firepanda PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
 target_link_libraries(firepanda PRIVATE httplib::httplib nlohmann_json::nlohmann_json Threads::Threads)
-target_compile_options(firepanda PRIVATE -Wall -Wextra -Wpedantic)
-install(TARGETS firepanda RUNTIME DESTINATION bin)
+install(TARGETS firepanda RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+install(FILES LICENSE THIRD_PARTY_NOTICES.md DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/firepanda")
+install(DIRECTORY LICENSES/ DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/firepanda")
 
 option(FIREPANDA_SANITIZERS "Enable address/undefined-behavior sanitizers (development only)" OFF)
-if(FIREPANDA_SANITIZERS)
-  if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
-    message(FATAL_ERROR "Sanitizers require Clang or GCC")
-  endif()
-  target_compile_options(firepanda PRIVATE -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer)
-  target_link_options(firepanda PRIVATE -fsanitize=address,undefined)
+if(FIREPANDA_SANITIZERS AND NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+  message(FATAL_ERROR "Sanitizers require Clang or GCC")
 endif()
+function(firepanda_compile_settings target)
+  target_compile_features(${target} PRIVATE cxx_std_20)
+  target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
+  if(FIREPANDA_SANITIZERS)
+    target_compile_options(${target} PRIVATE -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer)
+    target_link_options(${target} PRIVATE -fsanitize=address,undefined)
+  endif()
+endfunction()
+firepanda_compile_settings(firepanda)
 
 find_program(CLANG_FORMAT NAMES clang-format HINTS /opt/homebrew/opt/llvm/bin)
 if(CLANG_FORMAT)
-  set(FIREPANDA_CPP native/main.cpp native/browser.cpp native/browser.hpp native/tools.cpp native/json.hpp)
+  set(FIREPANDA_CPP src/main.cpp src/browser.cpp src/browser.hpp src/tools.cpp src/json.hpp tests/json.cpp)
   add_custom_target(format COMMAND "${CLANG_FORMAT}" -i ${FIREPANDA_CPP}
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" VERBATIM)
   add_custom_target(format-check COMMAND "${CLANG_FORMAT}" --dry-run --Werror ${FIREPANDA_CPP}
@@ -54,9 +63,16 @@ if(CLANG_FORMAT)
 endif()
 
 if(BUILD_TESTING)
+  add_executable(json_test tests/json.cpp)
+  firepanda_compile_settings(json_test)
+  target_include_directories(json_test PRIVATE src)
+  target_link_libraries(json_test PRIVATE nlohmann_json::nlohmann_json)
+  add_test(NAME json_size COMMAND json_test)
   find_package(Python3 COMPONENTS Interpreter REQUIRED)
   add_test(NAME protocol COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/protocol.py" $<TARGET_FILE:firepanda>)
   set_tests_properties(protocol PROPERTIES TIMEOUT 30)
+  add_test(NAME dependency_updates COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/dependency_updates.py")
+  set_tests_properties(dependency_updates PROPERTIES TIMEOUT 15)
   add_test(NAME installer COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/installer.py")
   set_tests_properties(installer PROPERTIES TIMEOUT 15)
   add_test(NAME cdp_transport COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/transport.py" $<TARGET_FILE:firepanda>)

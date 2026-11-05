@@ -12,7 +12,6 @@ namespace firepanda {
 namespace {
 using Clock = std::chrono::steady_clock;
 using namespace std::chrono_literals;
-constexpr size_t max_links = 10000;
 constexpr size_t max_crawl_bytes = 4 * 1024 * 1024;
 constexpr std::array<std::string_view, 5> formats{"markdown", "text", "html", "rawHtml", "links"};
 
@@ -46,6 +45,40 @@ constexpr IntegerOption timeout_option{"timeout", 30000, 100, 120000};
 constexpr IntegerOption wait_option{"waitFor", 0, 0, 30000};
 constexpr IntegerOption limit_option{"limit", 10, 1, 100};
 constexpr IntegerOption depth_option{"maxDepth", 1, 0, 5};
+
+struct StringOption {
+  const char *name;
+  size_t maximum;
+  const char *description;
+
+  std::string parse(const Json &args) const {
+    const auto it = args.find(name);
+    if (it == args.end()) {
+      return {};
+    }
+    if (!it->is_string() || it->get_ref<const std::string &>().empty() ||
+        it->get_ref<const std::string &>().size() > maximum) {
+      throw std::invalid_argument(std::string(name) +
+                                  " must be a nonempty string within its byte limit");
+    }
+    return it->get<std::string>();
+  }
+
+  Json schema() const {
+    // JSON Schema lengths count characters; validation also enforces UTF-8 bytes.
+    return {{"type", "string"},
+            {"minLength", 1},
+            {"maxLength", maximum},
+            {"description",
+             std::string(description) + " Maximum " + std::to_string(maximum) + " UTF-8 bytes."}};
+  }
+};
+constexpr StringOption selector_option{
+    "waitForSelector", 2048,
+    "Wait for a CSS selector to match an element (presence, not visibility), within timeout."};
+constexpr StringOption text_option{
+    "waitForText", 4096,
+    "Wait for literal case-sensitive body text outside scripts/styles/templates, within timeout."};
 
 enum class Tool { scrape, crawl, map };
 Tool parse_tool(std::string_view name) {
@@ -180,20 +213,8 @@ PageRequest parse_request(const Json &args, Tool tool) {
   }
   request.timeout = std::chrono::milliseconds(timeout_option.parse(args));
   request.wait_for = std::chrono::milliseconds(wait_option.parse(args));
-  const auto condition = [&](const char *name, size_t maximum) {
-    const auto it = args.find(name);
-    if (it == args.end()) {
-      return std::string{};
-    }
-    if (!it->is_string() || it->get_ref<const std::string &>().empty() ||
-        it->get_ref<const std::string &>().size() > maximum) {
-      throw std::invalid_argument(std::string(name) +
-                                  " must be a nonempty string within its byte limit");
-    }
-    return it->get<std::string>();
-  };
-  request.wait_for_selector = condition("waitForSelector", 2048);
-  request.wait_for_text = condition("waitForText", 4096);
+  request.wait_for_selector = selector_option.parse(args);
+  request.wait_for_text = text_option.parse(args);
   if (args.contains("formats")) {
     if (!args["formats"].is_array() || args["formats"].empty()) {
       throw std::invalid_argument("formats must be a nonempty array");
@@ -227,18 +248,8 @@ Json make_tools() {
       {"onlyMainContent", {{"type", "boolean"}, {"default", true}}},
       {"timeout", timeout_option.schema()},
       {"waitFor", wait_option.schema()}};
-  properties["waitForSelector"] = {
-      {"type", "string"},
-      {"minLength", 1},
-      {"maxLength", 2048},
-      {"description", "Wait for a CSS selector to match an element (presence, not visibility), "
-                      "within timeout. Maximum 2048 UTF-8 bytes."}};
-  properties["waitForText"] = {
-      {"type", "string"},
-      {"minLength", 1},
-      {"maxLength", 4096},
-      {"description", "Wait for literal case-sensitive body text outside scripts/styles/templates, "
-                      "within timeout. Maximum 4096 UTF-8 bytes."}};
+  properties[selector_option.name] = selector_option.schema();
+  properties[text_option.name] = text_option.schema();
   properties["timeout"]["description"] =
       "Total per-page budget in milliseconds, including navigation and extraction";
   properties["waitFor"]["description"] = "Extra wait after page load, within timeout";
@@ -291,16 +302,19 @@ Json execute(Browser &browser, const std::string &name, const Json &args) {
   if (tool == Tool::map) {
     request.formats = {"links"};
   }
-  std::deque<std::pair<std::string, int>> queue{{request.url, 0}};
   std::unordered_set<std::string> queued{request.url}, discovered, visited;
+  // Set keys own frontier URLs for the whole crawl. Rehash preserves pointers
+  // (not iterators), and keys are never erased, so the queue needs no second copy.
+  std::deque<std::pair<const std::string *, int>> queue{{&*queued.begin(), 0}};
   Json pages = Json::array(), links = Json::array(), errors = Json::array(),
        warnings = Json::array();
   int attempted = 0;
   size_t bytes = 0;
   bool truncated = false;
   while (!queue.empty() && !stop_requested) {
-    auto [url, depth] = std::move(queue.front());
+    const auto [pending, depth] = queue.front();
     queue.pop_front();
+    const auto &url = *pending;
     if (visited.contains(url)) {
       continue;
     }
@@ -357,8 +371,10 @@ Json execute(Browser &browser, const std::string &name, const Json &args) {
             if (queued.size() == max_links) {
               truncated = true;
             } else {
-              queued.insert(candidate);
-              queue.emplace_back(std::move(candidate), depth + 1);
+              const auto [entry, inserted] = queued.insert(std::move(candidate));
+              if (inserted) {
+                queue.emplace_back(&*entry, depth + 1);
+              }
             }
           }
         }
@@ -368,11 +384,12 @@ Json execute(Browser &browser, const std::string &name, const Json &args) {
           page.erase("links");
           page.erase("linksTruncated");
         }
-        bytes += page.dump().size();
-        if (bytes > max_crawl_bytes) {
+        const auto size = serialized_size_within(page, max_crawl_bytes - bytes);
+        if (!size) {
           truncated = true;
           break;
         }
+        bytes += *size;
         pages.push_back(std::move(page));
       }
     } catch (const std::exception &e) {
@@ -380,7 +397,7 @@ Json execute(Browser &browser, const std::string &name, const Json &args) {
     }
   }
   Json result{{"attempted", attempted}, {"truncated", truncated || !queue.empty()}};
-  // Assignment moves the arrays; initializer-list construction would copy them.
+  // Transfer the accumulated arrays into the result.
   result["errors"] = std::move(errors);
   if (!warnings.empty()) {
     result["warnings"] = std::move(warnings);
