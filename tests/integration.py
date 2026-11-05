@@ -137,11 +137,39 @@ try:
     budget = structured(budget_result)
     assert not budget['errors'] and budget['truncated'] and budget['attempted'] == 2, budget.keys()
     assert len(budget['pages']) == 1 and len(budget['pages'][0]['text']) > 2 * 1024 * 1024, budget.keys()
-    redirects = tool("crawl", url=url + "/redirect-root", limit=5, maxDepth=1)
+    redirects = tool("crawl", url=url + "/redirect-root", limit=5, maxDepth=1, maxConcurrency=1)
     assert not redirects["errors"], redirects["errors"]
     assert redirects["attempted"] == 2 and len(redirects["pages"]) == 2, redirects
-    redirect_cap = tool("crawl", url=url + "/redirect-root", limit=2, maxDepth=1)
+    redirect_cap = tool("crawl", url=url + "/redirect-root", limit=2, maxDepth=1, maxConcurrency=1)
     assert not redirect_cap["truncated"] and len(redirect_cap["pages"]) == 2, redirect_cap
+    # A failed page reaps the browser only after its in-flight siblings drain;
+    # their results survive and the crawl resumes on a fresh child, still in
+    # breadth-first order.
+    child_before_flaky = child()[0]
+    flaky = tool("crawl", url=url + "/flaky-root", limit=10, maxDepth=1, timeout=8000,
+                 maxConcurrency=2)
+    assert [error["url"] for error in flaky["errors"]] == [url + "/p/broken"], flaky["errors"]
+    assert [p["metadata"]["url"] for p in flaky["pages"]] == [
+        url + "/flaky-root", url + "/p/slow-a", url + "/p/slow-b"], flaky
+    assert flaky["attempted"] == 4, flaky
+    resumed_child = child()[0]
+    assert resumed_child != child_before_flaky, "A failed page must relaunch the child"
+    # Overlapping fetches keep BFS order and beat the sequential wall time.
+    sequential_start = time.monotonic()
+    sequential = tool("crawl", url=url + "/parallel-root", limit=10, maxDepth=1, timeout=5000,
+                      maxConcurrency=1)
+    sequential_wall = time.monotonic() - sequential_start
+    parallel_start = time.monotonic()
+    parallel = tool("crawl", url=url + "/parallel-root", limit=10, maxDepth=1, timeout=5000)
+    parallel_wall = time.monotonic() - parallel_start
+    expected = [url + "/parallel-root", url + "/p/a", url + "/p/b", url + "/p/c"]
+    assert not sequential["errors"] and not parallel["errors"], (sequential, parallel)
+    assert [p["metadata"]["url"] for p in sequential["pages"]] == expected, sequential
+    assert [p["metadata"]["url"] for p in parallel["pages"]] == expected, parallel
+    # Three one-second children give the sequential crawl a three-second floor.
+    assert sequential_wall >= 3.0, sequential_wall
+    assert parallel_wall < sequential_wall - 1.0, (parallel_wall, sequential_wall)
+    assert child()[0] == resumed_child, "Successful concurrent crawls must reuse the child"
     first_child, socket_path = child()
     assert os.stat(os.path.dirname(socket_path)).st_mode & 0o777 == 0o700
     assert os.stat(socket_path).st_mode & 0o777 == 0o600

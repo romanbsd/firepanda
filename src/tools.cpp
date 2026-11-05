@@ -69,6 +69,8 @@ constexpr std::array options{
     OptionDef{"limit", OptionKind::integer, "Maximum pages to attempt", 10, 1, 100, true},
     OptionDef{"maxDepth", OptionKind::integer, "Maximum link depth from the start URL", 1, 0, 5,
               true},
+    OptionDef{"maxConcurrency", OptionKind::integer,
+              "Pages fetched in flight at once during this crawl", 4, 1, 16, true},
 };
 
 const OptionDef *find_option(std::string_view name) {
@@ -339,6 +341,7 @@ Json execute(Browser &browser, const std::string &name, const Json &args) {
     return browser.scrape(request);
   }
   const int limit = parse_integer(args, "limit"), max_depth = parse_integer(args, "maxDepth");
+  const int concurrency = parse_integer(args, "maxConcurrency");
   const std::string start_origin(origin(request.url));
   const auto deadline = Clock::now() + 120s;
   const auto page_timeout = request.timeout;
@@ -356,86 +359,161 @@ Json execute(Browser &browser, const std::string &name, const Json &args) {
   int attempted = 0;
   size_t bytes = 0;
   bool truncated = false;
-  while (!queue.empty() && !stop_requested) {
-    const auto [pending, depth] = queue.front();
-    queue.pop_front();
-    const auto &url = *pending;
-    if (visited.contains(url)) {
-      continue;
+  // A bound was reached: stop dispatching. Pages already in flight are drained.
+  bool exhausted = false;
+  // The serialization budget overflowed: later pages are dropped even though
+  // they were fetched, matching the sequential crawl that stops at the overflow.
+  bool budget_reached = false;
+
+  // One dispatched page; its result arrives through the future.
+  struct Inflight {
+    std::future<Json> page;
+    const std::string *url;
+    int depth;
+  };
+  std::deque<Inflight> inflight;
+  // std::async futures block in their destructors. Wait for any worker that
+  // outlives an early exit so browser teardown can never race a page thread.
+  struct Drain {
+    std::deque<Inflight> &pending;
+    ~Drain() {
+      for (auto &item : pending) {
+        if (item.page.valid()) {
+          item.page.wait();
+        }
+      }
     }
-    const auto remaining =
-        std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now());
-    if (attempted == limit || remaining < 100ms) {
-      truncated = true;
-      break;
+  } drain{inflight};
+
+  // Fold one successful page into the result exactly where the sequential crawl
+  // would have: consumption runs in dispatch order, so pages, links, and errors
+  // keep their breadth-first order even though fetches overlap.
+  auto record = [&](int depth, Json page) {
+    if (budget_reached) {
+      return; // Sequential stops at the first overflow and never reaches these.
     }
-    ++attempted;
-    request.url = url;
-    request.timeout = std::min(page_timeout, remaining);
-    // Leaf pages need no frontier links unless the caller requested them.
-    request.formats = page_formats;
-    if ((return_links || depth < max_depth) && !has_format(request.formats, "links")) {
-      request.formats.push_back("links");
+    const auto canonical =
+        normalize_url(page.at("metadata").at("url").get_ref<const std::string &>());
+    // A redirect may reach a URL already queued through a direct link. Track
+    // final destinations so that URL is neither rendered nor returned twice.
+    if (!visited.insert(canonical).second) {
+      return;
     }
-    try {
-      auto page = browser.scrape(request);
-      const auto canonical =
-          normalize_url(page.at("metadata").at("url").get_ref<const std::string &>());
-      // A redirect may reach a URL already queued through a direct link. Track
-      // final destinations so that URL is neither rendered nor returned twice.
-      if (!visited.insert(canonical).second) {
+    // Redirected pages are returned, but an external destination is never expanded.
+    const bool expand = origin(canonical) == start_origin;
+    if (tool == Tool::map && page.contains("warnings")) {
+      warnings.push_back({{"url", canonical}, {"warnings", std::move(page["warnings"])}});
+    }
+    truncated = truncated || page.value("linksTruncated", false);
+    if (const auto found = page.find("links"); found != page.end()) {
+      for (const auto &link : *found) {
+        std::string candidate;
+        try {
+          candidate = normalize_url(link.at("url").get_ref<const std::string &>());
+        } catch (const std::invalid_argument &) {
+          continue;
+        }
+        // Crawl only needs its frontier. Retaining a second map of every link wastes memory.
+        if (tool == Tool::map && !discovered.contains(candidate)) {
+          if (discovered.size() == max_links) {
+            truncated = true;
+          } else {
+            discovered.insert(candidate);
+            links.push_back({{"url", candidate}, {"title", link.value("title", "")}});
+          }
+        }
+        if (expand && depth < max_depth && origin(candidate) == start_origin &&
+            !queued.contains(candidate) && !visited.contains(candidate)) {
+          if (queued.size() == max_links) {
+            truncated = true;
+          } else {
+            const auto [entry, inserted] = queued.insert(std::move(candidate));
+            if (inserted) {
+              queue.emplace_back(&*entry, depth + 1);
+            }
+          }
+        }
+      }
+    }
+    if (tool == Tool::crawl) {
+      if (!return_links) {
+        page.erase("links");
+        page.erase("linksTruncated");
+      }
+      const auto size = serialized_size_within(page, max_crawl_bytes - bytes);
+      if (!size) {
+        truncated = true;
+        budget_reached = true;
+        exhausted = true;
+        return;
+      }
+      bytes += *size;
+      pages.push_back(std::move(page));
+    }
+  };
+
+  while (!stop_requested && (!inflight.empty() || (!queue.empty() && !exhausted))) {
+    // Fill the window in frontier order. Connections are checked out on this
+    // thread, so the managed browser is spawned exactly once.
+    while (!stop_requested && !exhausted && inflight.size() < static_cast<size_t>(concurrency) &&
+           !queue.empty()) {
+      const auto [pending, depth] = queue.front();
+      queue.pop_front();
+      const auto &url = *pending;
+      if (visited.contains(url)) {
         continue;
       }
-      // Redirected pages are returned, but an external destination is never expanded.
-      const bool expand = origin(canonical) == start_origin;
-      if (tool == Tool::map && page.contains("warnings")) {
-        warnings.push_back({{"url", canonical}, {"warnings", std::move(page["warnings"])}});
+      const auto remaining =
+          std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now());
+      if (attempted == limit || remaining < 100ms) {
+        truncated = true;
+        exhausted = true;
+        break;
       }
-      truncated = truncated || page.value("linksTruncated", false);
-      if (const auto found = page.find("links"); found != page.end()) {
-        for (const auto &link : *found) {
-          std::string candidate;
-          try {
-            candidate = normalize_url(link.at("url").get_ref<const std::string &>());
-          } catch (const std::invalid_argument &) {
-            continue;
-          }
-          // Crawl only needs its frontier. Retaining a second map of every link wastes memory.
-          if (tool == Tool::map && !discovered.contains(candidate)) {
-            if (discovered.size() == max_links) {
-              truncated = true;
-            } else {
-              discovered.insert(candidate);
-              links.push_back({{"url", candidate}, {"title", link.value("title", "")}});
-            }
-          }
-          if (expand && depth < max_depth && origin(candidate) == start_origin &&
-              !queued.contains(candidate) && !visited.contains(candidate)) {
-            if (queued.size() == max_links) {
-              truncated = true;
-            } else {
-              const auto [entry, inserted] = queued.insert(std::move(candidate));
-              if (inserted) {
-                queue.emplace_back(&*entry, depth + 1);
-              }
-            }
-          }
-        }
+      ++attempted;
+      request.url = url;
+      request.timeout = std::min(page_timeout, remaining);
+      // Leaf pages need no frontier links unless the caller requested them.
+      request.formats = page_formats;
+      if ((return_links || depth < max_depth) && !has_format(request.formats, "links")) {
+        request.formats.push_back("links");
       }
-      if (tool == Tool::crawl) {
-        if (!return_links) {
-          page.erase("links");
-          page.erase("linksTruncated");
-        }
-        const auto size = serialized_size_within(page, max_crawl_bytes - bytes);
-        if (!size) {
-          truncated = true;
-          break;
-        }
-        bytes += *size;
-        pages.push_back(std::move(page));
-      }
+      inflight.push_back({browser.scrape_async(request), pending, depth});
+    }
+    if (inflight.empty()) {
+      break;
+    }
+    // Consume the oldest dispatch first: results keep sequential BFS order.
+    Inflight item = std::move(inflight.front());
+    inflight.pop_front();
+    const std::string url = *item.url;
+    Json page;
+    try {
+      page = item.page.get();
     } catch (const std::exception &e) {
+      errors.push_back({{"url", url}, {"error", e.what()}});
+      // A failed fetch invalidates its connection: pause dispatch, drain the
+      // siblings while keeping their results, then reap and relaunch the
+      // browser before anything else is fetched.
+      while (!inflight.empty()) {
+        Inflight sibling = std::move(inflight.front());
+        inflight.pop_front();
+        try {
+          Json sibling_page = sibling.page.get();
+          browser.page_completed();
+          record(sibling.depth, std::move(sibling_page));
+        } catch (const std::exception &sibling_error) {
+          errors.push_back({{"url", *sibling.url}, {"error", sibling_error.what()}});
+        }
+      }
+      browser.restart();
+      continue;
+    }
+    browser.page_completed(); // Idle time counts from the fetch, not from recording.
+    try {
+      record(item.depth, std::move(page));
+    } catch (const std::exception &e) {
+      // Recording failures come from a healthy page; the browser stays up.
       errors.push_back({{"url", url}, {"error", e.what()}});
     }
   }

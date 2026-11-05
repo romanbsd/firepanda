@@ -56,15 +56,26 @@ with tempfile.TemporaryFile(mode="w+") as diagnostics:
             if i % 5 == 0:
                 assert not structured(tool("crawl", limit=3, maxDepth=1))["errors"]
                 assert len(structured(tool("map", limit=2))["links"]) == 2
-                redirects = structured(tool("crawl", "/redirect-root", limit=2, maxDepth=1))
+                redirects = structured(tool("crawl", "/redirect-root", limit=2, maxDepth=1,
+                                            maxConcurrency=1))
                 assert len(redirects["pages"]) == 2 and not redirects["truncated"]
             if i == 0:
                 baseline_descriptors = descriptor_count()
         assert tool("scrape", "/too-large", formats=["text"])["isError"]
         assert tool("scrape", "/slow", timeout=100)["isError"]
         assert not tool("scrape")["isError"], "Recovery after size/timeout failure failed"
+        # Concurrent fetches must not leak connections across a crawl failure.
+        parallel = structured(tool("crawl", "/parallel-root", limit=10, maxDepth=1, timeout=5000))
+        assert not parallel["errors"] and len(parallel["pages"]) == 4, parallel
+        flaky = structured(tool("crawl", "/flaky-root", limit=10, maxDepth=1, timeout=8000,
+                                maxConcurrency=2))
+        assert [error["url"] for error in flaky["errors"]] == [base + "/p/broken"], flaky["errors"]
+        assert [page["metadata"]["url"] for page in flaky["pages"]] == [
+            base + "/flaky-root", base + "/p/slow-a", base + "/p/slow-b"], flaky
         final_descriptors = descriptor_count()
-        assert final_descriptors == baseline_descriptors, (baseline_descriptors, final_descriptors)
+        # The pool may shrink when a failure reaps a warm multi-connection
+        # browser; it must never grow past the post-warm-up baseline.
+        assert final_descriptors <= baseline_descriptors, (baseline_descriptors, final_descriptors)
         service.process.stdin.close()
         service.process.stdin = None
         tail, _ = service.process.communicate(timeout=30)

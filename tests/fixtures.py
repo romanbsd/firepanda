@@ -20,6 +20,12 @@ class Fixture(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
+        if self.path == "/p/broken":
+            # An invalid status line aborts the navigation immediately while the
+            # crawl window still holds sibling pages in flight.
+            self.wfile.write(b"not-an-http-response\r\n\r\n")
+            self.close_connection = True
+            return
         if self.path == "/slow":
             time.sleep(2)
         if self.path in ("/ready", "/ready-no-observer"):
@@ -59,6 +65,16 @@ class Fixture(http.server.BaseHTTPRequestHandler):
             body = b'<html><main></main></html>'
         elif self.path == "/redirect-root":
             body = b'<html><title>Redirect root</title><main><a href="/redirect">Redirect</a><a href="/two">Direct</a></main></html>'
+        elif self.path == "/parallel-root":
+            body = (b'<html><title>Parallel root</title><main>'
+                    b'<a href="/p/a">A</a><a href="/p/b">B</a><a href="/p/c">C</a></main></html>')
+        elif self.path == "/flaky-root":
+            body = (b'<html><title>Flaky root</title><main>'
+                    b'<a href="/p/broken">Broken</a><a href="/p/slow-a">Slow A</a>'
+                    b'<a href="/p/slow-b">Slow B</a></main></html>')
+        elif self.path.startswith("/p/"):
+            time.sleep(1)
+            body = f'<html><title>{self.path}</title><main>Parallel {self.path}</main></html>'.encode()
         elif self.path == "/listing":
             body = (b'<html><head><title>Listing</title></head><body><header>Site chrome</header>'
                     b'<nav>Navigation noise</nav><section><h1>All products</h1>'

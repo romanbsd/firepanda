@@ -71,6 +71,17 @@ def call(path, formats, **extra):
     return elapsed
 
 
+def crawl(concurrency):
+    """One bounded crawl of the 10000-link root: root plus 50 leaves."""
+    start = time.perf_counter()
+    result = service.call('tools/call', name='crawl',
+                          arguments={'url': base + '/links', 'limit': 51, 'maxDepth': 1,
+                                     'timeout': 120000, 'maxConcurrency': concurrency})
+    elapsed = (time.perf_counter() - start) * 1000
+    assert not result.get('isError'), result
+    return elapsed
+
+
 try:
     report['cold_scrape_ms'] = call('/', ['markdown'])
     for name, formats, extra in [('/', ['markdown'], {}), ('/large', ['markdown'], {}),
@@ -78,6 +89,11 @@ try:
                                 ('/ready', ['text'], {'waitForText': 'Content ready'})]:
         call(name, formats, **extra)  # untimed warm-up for each scenario
         samples = [call(name, formats, **extra) for _ in range(args.iterations)]
+        report['scenarios'][name] = {'median_ms': statistics.median(samples), 'min_ms': min(samples), 'max_ms': max(samples)}
+    for name, concurrency in [('/links crawl maxConcurrency=1', 1),
+                              ('/links crawl maxConcurrency=4', 4)]:
+        crawl(concurrency)  # untimed warm-up
+        samples = [crawl(concurrency) for _ in range(args.iterations)]
         report['scenarios'][name] = {'median_ms': statistics.median(samples), 'min_ms': min(samples), 'max_ms': max(samples)}
 finally:
     service.process.stdin.close()

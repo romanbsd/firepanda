@@ -4,6 +4,7 @@
 #include <chrono>
 #include <csignal>
 #include <cstddef>
+#include <future>
 #include <memory>
 #include <optional>
 #include <string>
@@ -42,6 +43,17 @@ public:
   Browser(const Browser &) = delete;
   Browser &operator=(const Browser &) = delete;
   Json scrape(const PageRequest &request);
+  // Fetch one page on a worker thread over a pooled CDP connection. The main
+  // thread connects first (launching the browser if needed), so only one
+  // thread ever spawns the process; failures surface through the returned
+  // future without releasing the browser, which the crawl loop reaps after
+  // draining sibling pages.
+  std::future<Json> scrape_async(PageRequest request);
+  // Record completed page work for the idle deadline. Main thread only.
+  void page_completed();
+  // Reap the managed browser and every pooled connection; the next operation
+  // cold-starts a new child. Only call when no page worker is running.
+  void restart();
   std::optional<std::chrono::steady_clock::time_point> idle_deadline() const;
   void stop_if_idle();
 

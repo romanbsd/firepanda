@@ -29,6 +29,8 @@ The report includes executable size, version, architecture, and Lightpanda SHA-2
 | Article | 3000 paragraphs containing bold and italic elements |
 | Link discovery | 10000 unique local links |
 | JavaScript readiness | Text replaced after 300 ms; wait for `Content ready` |
+| Bounded crawl, serial | 10000-link root plus 50 leaves at `maxConcurrency=1` |
+| Bounded crawl, concurrent | The same crawl at `maxConcurrency=4` |
 
 Run on an otherwise idle machine, retain the compiler/build configuration, and
 compare the same fixtures and Lightpanda version across binaries. Earlier service

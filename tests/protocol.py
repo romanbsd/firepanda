@@ -55,6 +55,12 @@ class Protocol(unittest.TestCase):
             for name in ("waitForSelector", "waitForText"):
                 self.assertEqual(properties[name]["type"], "string")
                 self.assertEqual(properties[name]["minLength"], 1)
+            # Concurrency applies to crawl/map only; scrape stays single-page.
+            self.assertEqual("maxConcurrency" in properties, tool["name"] != "scrape")
+            if tool["name"] != "scrape":
+                self.assertEqual(properties["maxConcurrency"]["default"], 4)
+                self.assertEqual(properties["maxConcurrency"]["minimum"], 1)
+                self.assertEqual(properties["maxConcurrency"]["maximum"], 16)
 
     def test_invalid_requests_recover(self):
         out = run(["{", "[]", message(1, "unknown", _meta=META),
@@ -91,7 +97,7 @@ class Protocol(unittest.TestCase):
 
     def test_unsigned_integer_boundaries(self):
         values = [-1, 0, 2**31, 2**63, 2**64 - 1, 1.5, True]
-        for field in ("timeout", "waitFor", "limit", "maxDepth"):
+        for field in ("timeout", "waitFor", "limit", "maxDepth", "maxConcurrency"):
             invalid = [v for v in values if v not in (0,)] if field in ("waitFor", "maxDepth") else values
             out = run([message(i, "tools/call", _meta=META, name="crawl", arguments={
                 "url": "https://example.com", field: v}) for i, v in enumerate(invalid)])

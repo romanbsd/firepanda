@@ -10,34 +10,50 @@ tools are `scrape`, `crawl`, and `map`. The executable does not invoke Node, Doc
 Lightpanda's native `serve --unix-socket` interface supports CDP WebSockets at
 `/`. Firepanda connects directly, without HTTP endpoint discovery or a TCP port.
 The socket lives in a `mkdtemp` directory with mode 0700; Lightpanda creates the
-socket with mode 0600. Each MCP process owns one lazy browser child and one CDP
-connection. `--socket` attaches to an independently managed browser instead.
-CDP replies and events share this connection. Only bounded page-load and main-document status observations are retained for the
+socket with mode 0600. Each MCP process owns one lazy browser child and a pool
+of CDP WebSocket connections. Lightpanda's MultiClient mode serves each
+connection with a dedicated OS thread and an isolated browser instance inside
+that single child, so concurrent page fetches never need a second process.
+`--socket` attaches to an independently managed browser instead.
+CDP replies and events share the connection that carried their command. Only
+bounded page-load and main-document status observations are retained for the
 active session; arbitrary event bodies are discarded immediately.
 cpp-httplib's blocking read timeout can restart while processing control frames
 or fragments. A deadline worker exists only while a page operation is active;
 it watches a duplicate descriptor registered only after connect() succeeds and
 shuts it down at the operation deadline or on a stop signal. The signal handler
-and the worker's destructor wake it through a non-blocking self-pipe, so idle
-waiting costs no periodic wakeups. Owning the duplicate prevents descriptor
-reuse during retries from targeting another file.
+wakes it through a shared non-blocking self-pipe, and its destructor wakes it
+through a private one, so idle waiting costs no periodic wakeups and concurrent
+workers can never steal a sibling's teardown byte. The shared pipe still serves
+stop delivery: a sibling may drain the stop byte first, so each worker caps its
+poll timeout at 250 ms and re-checks the stop flag even after a missed
+wake-up. Owning the duplicate prevents descriptor reuse during retries from
+targeting another file.
 The worker is joined and its descriptor closed before the operation returns.
 The shutdown flag uses a lock-free atomic shared with the signal handler.
 While idle, the main thread uses `pselect` with an atomic signal-mask transition
 instead of checking a flag and then entering a separate blocking read. This
 closes the idle shutdown race without periodically waking to poll for signals.
 
-One connection and serialized operations avoid contention. Each scrape uses a
-fresh browser context, navigates once, waits for `Page.loadEventFired`, evaluates
-one projection of the DOM, then disposes the context. Requested formats alone
-cross the socket. Extra `waitFor` is available for scripts that continue after
-load. There is no claim of network-idle detection. Connection/process reuse is
-tested, but Unix-socket versus TCP speed has not been benchmarked; rendering and
-network requests can dominate either transport.
+MCP requests execute serially, but a crawl or map fetches pages concurrently:
+the main thread fills a window of at most `maxConcurrency` pages by checking
+out pooled connections (launching the browser if needed), then consumes results
+in dispatch order. Consumption order equals sequential breadth-first order, so
+pages, links, and errors are identical to a serial crawl even though fetches
+overlap. Each scrape still uses a fresh browser context, navigates once, waits
+for `Page.loadEventFired`, evaluates one projection of the DOM, then disposes
+the context. Requested formats alone cross the socket. Extra `waitFor` is
+available for scripts that continue after load. There is no claim of
+network-idle detection. Connection/process reuse is tested, but Unix-socket
+versus TCP speed has not been benchmarked; rendering and network requests can
+dominate either transport.
 
 Timeouts invalidate the CDP connection. Contexts use `disposeOnDetach`, so failed
 streams are disconnected without sending further cleanup commands. Managed browser failures also stop the
-child before the next operation can restart it. EOF and SIGTERM/SIGINT initiate
+child before the next operation can restart it. Inside a crawl, a failed page
+pauses dispatch, drains its in-flight siblings while keeping their successful
+results, then reaps the whole browser; the next page cold-starts a fresh child.
+EOF and SIGTERM/SIGINT initiate
 cleanup; only the child PID created by this process is signalled and reaped.
 An external browser is never terminated. SIGKILL cannot run cleanup.
 
@@ -72,8 +88,9 @@ Requests are limited to 1 MiB before parsing, JSON nesting to 64 levels,
 WebSocket messages to 16 MiB, and
 serialized tool data to 8 MiB (text and structured data duplicate that payload
 on the MCP wire up to 1 MiB; larger results omit structured data). Crawl limits
-are 100 pages, depth 5, 120 seconds total, 10,000 discovered links, and 4 MiB of
-page data. Limits return `truncated` and per-page
+are 100 pages, depth 5, 120 seconds total, 10,000 discovered links, 4 MiB of
+page data, and 16 pages in flight (4 by default, set per call with
+`maxConcurrency`). Limits return `truncated` and per-page
 errors. Calls execute serially; cancellation notifications do not interrupt a
 running call. Each page has a configurable deadline of at most 120 seconds.
 
@@ -100,7 +117,9 @@ requests, URL/argument validation, notifications, and missing-browser errors.
 `tests/integration.py` starts an actual native Lightpanda child and a local HTTP
 fixture, testing JavaScript rendering, all formats, deduplication, same-origin
 crawl, limits, timeout recovery, browser reuse, private socket permissions,
-external-browser ownership, EOF cleanup, and SIGTERM during navigation/post-load waits.
+concurrent crawl ordering and wall time, sibling results kept across a page
+failure with child relaunch, external-browser ownership, EOF cleanup, and
+SIGTERM during navigation/post-load waits.
 `tests/transport.py` uses adversarial Unix-socket CDP peers to check continuous
 pings, fragmented messages, malformed replies, reconnection, and SIGTERM while
 reading a fragment stream. Exact and overflowing link caps are tested separately.
