@@ -11,10 +11,15 @@
 
 namespace firepanda {
 inline constexpr size_t max_links = 10000;
-// The signal handler and deadline worker both access this flag. Only lock-free
-// atomics are safe to use from a signal handler.
+// The signal handler, deadline worker, and request loops share this flag. Only
+// lock-free atomics are safe to use from a signal handler.
 static_assert(std::atomic<bool>::is_always_lock_free);
 extern std::atomic<bool> stop_requested;
+// Self-pipe shared by the signal handler and deadline workers; create it before
+// installing signal handlers, then let workers poll read end [0].
+extern int stop_wakeup[2];
+bool init_stop_wakeup() noexcept;
+void wake_stop_waiters() noexcept;
 struct Options {
   std::string lightpanda = "lightpanda";
   std::string socket;

@@ -16,6 +16,7 @@ namespace {
 using firepanda::Json;
 void interrupt(int) {
   firepanda::stop_requested = 1;
+  firepanda::wake_stop_waiters(); // Deadline workers must not wait out a stale deadline.
 }
 
 bool wait_for_input(std::optional<std::chrono::steady_clock::time_point> idle_deadline) {
@@ -56,8 +57,11 @@ bool wait_for_input(std::optional<std::chrono::steady_clock::time_point> idle_de
 }
 constexpr std::size_t max_structured_content_bytes = 1024 * 1024;
 constexpr const char *version_key = "io.modelcontextprotocol/protocolVersion";
-const Json versions =
-    Json::array({"2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"});
+// Modern revision first; legacy initialize still negotiates the 2025-11-25 fallback.
+constexpr const char *protocol_version = "2026-07-28";
+constexpr const char *fallback_protocol_version = "2025-11-25";
+const Json versions = Json::array(
+    {protocol_version, fallback_protocol_version, "2025-06-18", "2025-03-26", "2024-11-05"});
 const Json identity{{"name", "firepanda"}, {"version", FIREPANDA_VERSION}};
 Json error(Json id, int code, const std::string &message) {
   return {
@@ -94,8 +98,8 @@ public:
       return error(id, -32602, "_meta must be an object");
     }
     const auto version = meta.value(version_key, Json());
-    const bool modern = version == "2026-07-28";
-    if (!version.is_null() && version != "2026-07-28") {
+    const bool modern = version == protocol_version;
+    if (!version.is_null() && version != protocol_version) {
       auto e = error(id, -32022, "Unsupported protocol version");
       e["error"]["data"] = {{"supported", versions}, {"requested", version}};
       return e;
@@ -112,9 +116,9 @@ public:
                        "initialize requires protocolVersion, capabilities, and clientInfo");
         }
         auto negotiated = p.at("protocolVersion");
-        if (negotiated == "2026-07-28" ||
+        if (negotiated == protocol_version ||
             std::find(versions.begin(), versions.end(), negotiated) == versions.end()) {
-          negotiated = "2025-11-25";
+          negotiated = fallback_protocol_version;
         }
         initialized_ = true;
         result = {{"protocolVersion", negotiated},
@@ -222,6 +226,10 @@ int main(int argc, char **argv) {
   if (!options.socket.empty() && (options.socket.front() != '/' || options.socket.size() > 100)) {
     std::cerr << "--socket must be an absolute Unix socket path of at most 100 bytes\n";
     return 2;
+  }
+  if (!firepanda::init_stop_wakeup()) {
+    std::cerr << "firepanda: cannot create signal wakeup pipe\n";
+    return 1;
   }
   struct sigaction action{};
   action.sa_handler = interrupt;

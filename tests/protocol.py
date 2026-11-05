@@ -3,35 +3,23 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 import unittest
+
+from harness import META, PROTOCOL_VERSION, message, run_batch
 
 BINARY = sys.argv[1]
 sys.argv = sys.argv[:1]
-META = {"io.modelcontextprotocol/protocolVersion": "2026-07-28"}
-
-
-def request(i, method, **params):
-    return {"jsonrpc": "2.0", "id": i, "method": method, "params": params}
 
 
 def run(messages):
-    data = "\n".join(x if isinstance(x, str) else json.dumps(x) for x in messages) + "\n"
-    # Batch input can exceed pipe capacity while responses are still being written.
-    # Keep interactive tests on pipes; use a seekable source for these pipelined batches.
-    with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as source:
-        source.write(data)
-        source.seek(0)
-        result = subprocess.run([BINARY, "--lightpanda", "/missing/lightpanda"], stdin=source,
-                                capture_output=True, text=True, timeout=15, check=True)
-    return [json.loads(line) for line in result.stdout.splitlines()]
+    return run_batch([BINARY, "--lightpanda", "/missing/lightpanda"], messages)
 
 
 class Protocol(unittest.TestCase):
     def test_version_matches_mcp_identity(self):
         cli = subprocess.run([BINARY, "--version"], capture_output=True, text=True, timeout=5, check=True)
         version = cli.stdout.strip().split()[1]
-        response = run([request(1, "initialize", protocolVersion="2025-11-25", capabilities={},
+        response = run([message(1, "initialize", protocolVersion="2025-11-25", capabilities={},
                                 clientInfo={"name": "test", "version": "1"})])[0]
         self.assertEqual(response['result']['serverInfo']['version'], version)
 
@@ -46,18 +34,18 @@ class Protocol(unittest.TestCase):
 
     def test_modern_stateless_and_legacy(self):
         out = run([
-            request(1, "tools/list", _meta=META),
-            request(2, "server/discover", _meta=META),
-            request(3, "tools/list"),
-            request(4, "initialize", protocolVersion="2025-11-25", capabilities={}, clientInfo={"name": "test", "version": "1"}),
+            message(1, "tools/list", _meta=META),
+            message(2, "server/discover", _meta=META),
+            message(3, "tools/list"),
+            message(4, "initialize", protocolVersion="2025-11-25", capabilities={}, clientInfo={"name": "test", "version": "1"}),
             {"jsonrpc": "2.0", "method": "notifications/initialized"},
-            request(5, "tools/list"), request(6, "ping"),
-            request(7, "ping", _meta={"io.modelcontextprotocol/protocolVersion": "2099-01-01"}),
+            message(5, "tools/list"), message(6, "ping"),
+            message(7, "ping", _meta={"io.modelcontextprotocol/protocolVersion": "2099-01-01"}),
         ])
         self.assertEqual([x["id"] for x in out], list(range(1, 8)))
         self.assertEqual({t["name"] for t in out[0]["result"]["tools"]}, {"scrape", "crawl", "map"})
         self.assertEqual(out[0]["result"]["resultType"], "complete")
-        self.assertIn("2026-07-28", out[1]["result"]["supportedVersions"])
+        self.assertIn(PROTOCOL_VERSION, out[1]["result"]["supportedVersions"])
         self.assertEqual(out[2]["error"]["code"], -32600)
         self.assertNotIn("resultType", out[4]["result"])
         self.assertEqual(out[5]["result"], {})
@@ -69,9 +57,9 @@ class Protocol(unittest.TestCase):
                 self.assertEqual(properties[name]["minLength"], 1)
 
     def test_invalid_requests_recover(self):
-        out = run(["{", "[]", request(1, "unknown", _meta=META),
-                   request(2, "ping", _meta=[]), "x" * (1024 * 1024 + 1),
-                   request(3, "ping", _meta=META)])
+        out = run(["{", "[]", message(1, "unknown", _meta=META),
+                   message(2, "ping", _meta=[]), "x" * (1024 * 1024 + 1),
+                   message(3, "ping", _meta=META)])
         self.assertEqual([x["error"]["code"] for x in out[:-1]], [-32700, -32600, -32601, -32602, -32600])
         self.assertEqual(out[-1]["id"], 3)
 
@@ -84,18 +72,18 @@ class Protocol(unittest.TestCase):
             {"url": "https://example.com", "onlyMainContent": "true"},
             {"url": "https://example.com", "formats": []}, {"url": "https://example.com", "unknown": True},
         ]
-        out = run([request(i, "tools/call", _meta=META, name="scrape", arguments=a) for i, a in enumerate(args)])
+        out = run([message(i, "tools/call", _meta=META, name="scrape", arguments=a) for i, a in enumerate(args)])
         self.assertEqual([x["id"] for x in out], list(range(len(args))))
         self.assertTrue(all(x["error"]["code"] == -32602 for x in out))
-        out = run([request(1, "tools/call", _meta=META, name="scrape", arguments={"url": "https://example.com"})])
+        out = run([message(1, "tools/call", _meta=META, name="scrape", arguments={"url": "https://example.com"})])
         self.assertTrue(out[0]["result"]["isError"])
         self.assertIn("Cannot start Lightpanda", out[0]["result"]["content"][0]["text"])
 
     def test_depth_limit_and_large_url_recover(self):
         # Both inputs are below the byte limit but used to exercise recursive code.
         deeply_nested = '{"jsonrpc":"2.0","id":1,"method":"ping","params":{"deep":' + '[' * 5000 + '0' + ']' * 5000 + '}}'
-        out = run([deeply_nested, request(2, "tools/call", _meta=META, name="scrape", arguments={
-            "url": "https://example.com/" + "x" * 8100, "timeout": 100}), request(3, "ping", _meta=META)])
+        out = run([deeply_nested, message(2, "tools/call", _meta=META, name="scrape", arguments={
+            "url": "https://example.com/" + "x" * 8100, "timeout": 100}), message(3, "ping", _meta=META)])
         self.assertEqual(out[0]["error"]["code"], -32600)
         self.assertIn("nesting", out[0]["error"]["message"])
         self.assertTrue(out[1]["result"]["isError"])  # valid URL reaches the missing browser
@@ -105,7 +93,7 @@ class Protocol(unittest.TestCase):
         values = [-1, 0, 2**31, 2**63, 2**64 - 1, 1.5, True]
         for field in ("timeout", "waitFor", "limit", "maxDepth"):
             invalid = [v for v in values if v not in (0,)] if field in ("waitFor", "maxDepth") else values
-            out = run([request(i, "tools/call", _meta=META, name="crawl", arguments={
+            out = run([message(i, "tools/call", _meta=META, name="crawl", arguments={
                 "url": "https://example.com", field: v}) for i, v in enumerate(invalid)])
             self.assertEqual([x["id"] for x in out], list(range(len(invalid))))
             self.assertTrue(all(x["error"]["code"] == -32602 for x in out), (field, out))
@@ -113,14 +101,14 @@ class Protocol(unittest.TestCase):
     def test_readiness_validation_before_browser(self):
         for field, maximum in (("waitForSelector", 2048), ("waitForText", 4096)):
             values = [None, False, 1, [], {}, "", "x" * (maximum + 1), "日" * maximum]
-            out = run([request(i, "tools/call", _meta=META, name="scrape", arguments={
+            out = run([message(i, "tools/call", _meta=META, name="scrape", arguments={
                 "url": "https://example.com", field: value}) for i, value in enumerate(values)])
             self.assertEqual([x["id"] for x in out], list(range(len(values))))
             self.assertTrue(all(x.get("error", {}).get("code") == -32602 for x in out), (field, out))
 
     def test_invalid_ipv6_rejected_before_browser_start(self):
         urls = ["http://[dead]/", "http://[:::]/", "http://[1:2:3]/"]
-        out = run([request(i, "tools/call", _meta=META, name="scrape", arguments={"url": url})
+        out = run([message(i, "tools/call", _meta=META, name="scrape", arguments={"url": url})
                    for i, url in enumerate(urls)])
         self.assertEqual([x["id"] for x in out], list(range(len(urls))))
         self.assertTrue(all(x.get("error", {}).get("code") == -32602 for x in out), out)
@@ -129,7 +117,7 @@ class Protocol(unittest.TestCase):
         process = subprocess.Popen([BINARY], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
             process.stdout.close()
-            process.stdin.write(json.dumps(request(1, "ping", _meta=META)) + "\n")
+            process.stdin.write(json.dumps(message(1, "ping", _meta=META)) + "\n")
             process.stdin.flush()
             try:
                 self.assertEqual(process.wait(timeout=3), 1)
@@ -152,7 +140,7 @@ class Protocol(unittest.TestCase):
         for _ in range(10):
             process = subprocess.Popen([BINARY], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             try:
-                process.stdin.write(json.dumps(request(1, "ping", _meta=META)) + "\n")
+                process.stdin.write(json.dumps(message(1, "ping", _meta=META)) + "\n")
                 process.stdin.flush()
                 self.assertEqual(json.loads(process.stdout.readline())["id"], 1)
                 process.terminate()
@@ -164,7 +152,7 @@ class Protocol(unittest.TestCase):
                     process.wait()
                 process.stdout.close()
                 process.stderr.close()
-        out = run([request(i, "ping", _meta=META) for i in range(100)])
+        out = run([message(i, "ping", _meta=META) for i in range(100)])
         self.assertEqual([r["id"] for r in out], list(range(100)))
 
 

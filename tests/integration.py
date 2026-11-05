@@ -1,8 +1,6 @@
 """Actual native Lightpanda + local fixture website. No external website needed."""
 import http.server
-import json
 import os
-import selectors
 import shlex
 import subprocess
 import sys
@@ -14,21 +12,20 @@ binary, lightpanda = sys.argv[1:3]
 
 
 from fixtures import Fixture
+from harness import Service, structured
 
 
 server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Fixture)
 threading.Thread(target=server.serve_forever, daemon=True).start()
 url = "http://127.0.0.1:" + str(server.server_port)
-process = subprocess.Popen([binary, "--lightpanda", lightpanda], stdin=subprocess.PIPE,
-                           stdout=subprocess.PIPE, text=True, bufsize=1)
-sequence = 0
+service = Service([binary, "--lightpanda", lightpanda])
 
 
 def children():
     """Inspect only the service's direct child; do not infer global orphans."""
     rows = subprocess.check_output(["ps", "-axo", "pid=,ppid="], text=True)
     return [int(pid) for pid, ppid in (line.split() for line in rows.splitlines())
-            if int(ppid) == process.pid]
+            if int(ppid) == service.process.pid]
 
 
 def child():
@@ -41,34 +38,11 @@ def child():
 
 
 def rpc(method, **params):
-    global sequence
-    sequence += 1
-    params["_meta"] = {"io.modelcontextprotocol/protocolVersion": "2026-07-28"}
-    process.stdin.write(json.dumps({"jsonrpc": "2.0", "id": sequence, "method": method, "params": params}) + "\n")
-    process.stdin.flush()
-    with selectors.DefaultSelector() as sel:
-        sel.register(process.stdout, selectors.EVENT_READ)
-        seconds = params.get("arguments", {}).get("timeout", 30000) / 1000 + 10
-        if method == "tools/call" and params.get("name") in ("crawl", "map"):
-            seconds = max(seconds, 130)  # fixed 120-second crawl budget plus transport slack
-        assert sel.select(seconds), "Service did not answer within its test budget"
-    response = json.loads(process.stdout.readline())
-    assert response["id"] == sequence, response
-    assert "error" not in response, response
-    return response["result"]
-
-
-def structured(result):
-    if "structuredContent" in result:
-        return result["structuredContent"]
-    # Large results omit the duplicate structured payload; the text block is JSON.
-    return json.loads(result["content"][0]["text"])
+    return service.call(method, **params)
 
 
 def tool(name, **arguments):
-    result = rpc("tools/call", name=name, arguments=arguments)
-    assert not result.get("isError"), result
-    return structured(result)
+    return service.tool(name, **arguments)
 
 
 try:
@@ -195,14 +169,14 @@ try:
     assert final_child != first_child, "Timeout must replace the interrupted child"
     print("PASS: native UDS WebSocket, JS, formats, crawl/map, timeout recovery, reuse, private permissions")
 finally:
-    process.stdin.close()
+    service.process.stdin.close()
     try:
-        process.wait(timeout=10)
+        service.process.wait(timeout=10)
     except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait()
+        service.process.kill()
+        service.process.wait()
         raise
-assert process.returncode == 0, process.returncode
+assert service.process.returncode == 0, service.process.returncode
 assert not os.path.exists(os.path.dirname(socket_path)), "Private socket directory leaked"
 try:
     os.kill(final_child, 0)
@@ -212,8 +186,7 @@ else:
     raise AssertionError("Native Lightpanda child survived EOF")
 
 # The MCP service remains available after its lazily started browser goes idle.
-process = subprocess.Popen([binary, "--lightpanda", lightpanda, "--idle-timeout", "1"],
-                           stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
+service = Service([binary, "--lightpanda", lightpanda, "--idle-timeout", "1"])
 try:
     assert len(rpc("tools/list")["tools"]) == 3
     assert not children(), "Tool discovery must not launch the browser"
@@ -225,7 +198,7 @@ try:
         time.sleep(0.05)
     assert not children(), "Idle browser was not stopped and reaped"
     assert not os.path.exists(os.path.dirname(idle_socket)), "Idle socket directory leaked"
-    assert process.poll() is None, "Idle shutdown must keep the MCP service running"
+    assert service.process.poll() is None, "Idle shutdown must keep the MCP service running"
     rpc("ping")
     assert not children(), "Ping must not relaunch the browser"
     tool("scrape", url=url)
@@ -245,21 +218,20 @@ try:
         time.sleep(0.05)
     assert not children(), "MCP housekeeping kept the browser alive"
 finally:
-    process.stdin.close()
-    process.wait(timeout=10)
-assert process.returncode == 0
+    service.process.stdin.close()
+    service.process.wait(timeout=10)
+assert service.process.returncode == 0
 
-process = subprocess.Popen([binary, "--lightpanda", lightpanda, "--idle-timeout", "0"],
-                           stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
+service = Service([binary, "--lightpanda", lightpanda, "--idle-timeout", "0"])
 try:
     tool("scrape", url=url)
     warm_pid, _ = child()
     time.sleep(1.3)
     assert child()[0] == warm_pid, "Disabled idle timeout stopped the browser"
 finally:
-    process.stdin.close()
-    process.wait(timeout=10)
-assert process.returncode == 0
+    service.process.stdin.close()
+    service.process.wait(timeout=10)
+assert service.process.returncode == 0
 print("PASS: lazy launch, quiet/active MCP idle expiry, restart, active-request protection, deadline renewal, disable")
 
 # An independently managed browser must survive idle timeouts and Firepanda shutdown.
@@ -272,8 +244,7 @@ with tempfile.TemporaryDirectory(prefix="firepanda-external-", dir="/tmp") as di
                 break
             assert external.poll() is None, "External browser exited"
             time.sleep(0.01)
-        process = subprocess.Popen([binary, "--socket", sock, "--idle-timeout", "1"], stdin=subprocess.PIPE,
-                                   stdout=subprocess.PIPE, text=True, bufsize=1)
+        service = Service([binary, "--socket", sock, "--idle-timeout", "1"])
         try:
             assert len(rpc("tools/list")["tools"]) == 3
             assert "Rendered by JavaScript" in tool("scrape", url=url)["markdown"]
@@ -284,9 +255,9 @@ with tempfile.TemporaryDirectory(prefix="firepanda-external-", dir="/tmp") as di
             assert os.path.exists(sock), "Failure cleanup removed an external socket"
             assert "Rendered by JavaScript" in tool("scrape", url=url)["markdown"]
         finally:
-            process.stdin.close()
-            process.wait(timeout=10)
-        assert process.returncode == 0, process.returncode
+            service.process.stdin.close()
+            service.process.wait(timeout=10)
+        assert service.process.returncode == 0, service.process.returncode
         assert external.poll() is None, "Firepanda terminated the external browser"
     finally:
         external.terminate()
@@ -295,21 +266,17 @@ print("PASS: EOF cleanup and external-browser ownership")
 
 # Exercise both a blocked CDP read and the post-load wait, which must be interruptible.
 def check_sigterm(arguments):
-    global process, sequence
-    process = subprocess.Popen([binary, "--lightpanda", lightpanda], stdin=subprocess.PIPE,
-                               stdout=subprocess.PIPE, text=True, bufsize=1)
+    global service
+    service = Service([binary, "--lightpanda", lightpanda])
     try:
         tool("scrape", url=url)
         owned_pid, owned_socket = child()
-        sequence += 1
-        process.stdin.write(json.dumps({"jsonrpc": "2.0", "id": sequence, "method": "tools/call", "params": {
-            "_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28"},
-            "name": "scrape", "arguments": arguments}}) + "\n")
-        process.stdin.flush()
+        # Post the request without waiting: SIGTERM must interrupt the running call.
+        service.post("tools/call", name="scrape", arguments=arguments)
         time.sleep(0.1)
-        process.terminate()
-        process.wait(timeout=5)
-        assert process.returncode == 0, process.returncode
+        service.process.terminate()
+        service.process.wait(timeout=5)
+        assert service.process.returncode == 0, service.process.returncode
         assert not os.path.exists(os.path.dirname(owned_socket)), "Socket directory survived SIGTERM"
         try:
             os.kill(owned_pid, 0)
@@ -318,10 +285,10 @@ def check_sigterm(arguments):
         else:
             raise AssertionError("Owned browser survived SIGTERM")
     finally:
-        process.stdin.close()
-        if process.poll() is None:
-            process.kill()
-            process.wait()
+        service.process.stdin.close()
+        if service.process.poll() is None:
+            service.process.kill()
+            service.process.wait()
 
 
 try:

@@ -15,81 +15,153 @@ using namespace std::chrono_literals;
 constexpr size_t max_crawl_bytes = 4 * 1024 * 1024;
 constexpr std::array<std::string_view, 5> formats{"markdown", "text", "html", "rawHtml", "links"};
 
-// Keep defaults and bounds in one place: the advertised schema must match validation.
-struct IntegerOption {
+enum class Tool { scrape, crawl, map };
+
+// One row per tool: dispatch and tools/list both read this table.
+struct ToolDef {
+  Tool id;
   const char *name;
-  int fallback;
-  int minimum;
-  int maximum;
-
-  int parse(const Json &args) const {
-    const auto it = args.find(name);
-    if (it == args.end()) {
-      return fallback;
-    }
-    if (!it->is_number_integer()) {
-      throw std::invalid_argument(std::string(name) + " must be an integer");
-    }
-    // Compare as JSON before narrowing, including unsigned integers above INT64_MAX.
-    if (*it < minimum || *it > maximum) {
-      throw std::invalid_argument(std::string(name) + " is outside the supported range");
-    }
-    return it->get<int>();
-  }
-
-  Json schema() const {
-    return {{"type", "integer"}, {"minimum", minimum}, {"maximum", maximum}, {"default", fallback}};
-  }
-};
-constexpr IntegerOption timeout_option{"timeout", 30000, 100, 120000};
-constexpr IntegerOption wait_option{"waitFor", 0, 0, 30000};
-constexpr IntegerOption limit_option{"limit", 10, 1, 100};
-constexpr IntegerOption depth_option{"maxDepth", 1, 0, 5};
-
-struct StringOption {
-  const char *name;
-  size_t maximum;
   const char *description;
+};
+constexpr std::array tool_table{
+    ToolDef{Tool::scrape, "scrape",
+            "Render a page with native Lightpanda and extract content. Markdown supports common "
+            "article elements."},
+    ToolDef{Tool::crawl, "crawl",
+            "Breadth-first crawl of same-origin pages. Returns pages and per-page errors; bounded "
+            "by depth, page count, 120 seconds, and result size."},
+    ToolDef{Tool::map, "map",
+            "Discover links with a bounded same-origin crawl. External links are listed but never "
+            "followed. Not a sitemap or search engine."},
+};
 
-  std::string parse(const Json &args) const {
-    const auto it = args.find(name);
-    if (it == args.end()) {
-      return {};
-    }
-    if (!it->is_string() || it->get_ref<const std::string &>().empty() ||
-        it->get_ref<const std::string &>().size() > maximum) {
-      throw std::invalid_argument(std::string(name) +
-                                  " must be a nonempty string within its byte limit");
-    }
-    return it->get<std::string>();
+enum class OptionKind { integer, string, boolean, url, formats };
+
+// One row per accepted argument. The advertised schema, validation bounds,
+// defaults, and per-tool applicability all derive from these entries.
+struct OptionDef {
+  const char *name;
+  OptionKind kind;
+  const char *description;
+  int fallback;        // integer/boolean default
+  int minimum;         // integer minimum
+  int maximum;         // integer maximum or string byte limit
+  bool discovery_only; // accepted by crawl/map; rejected by scrape
+};
+constexpr std::array options{
+    OptionDef{"url", OptionKind::url, "Absolute HTTP(S) URL without credentials", 0, 0, 0, false},
+    OptionDef{"formats", OptionKind::formats, "Output formats to extract", 0, 0, 0, false},
+    OptionDef{"onlyMainContent", OptionKind::boolean,
+              "Remove common page chrome and prefer main/article content", 1, 0, 0, false},
+    OptionDef{"timeout", OptionKind::integer,
+              "Total per-page budget in milliseconds, including navigation and extraction", 30000,
+              100, 120000, false},
+    OptionDef{"waitFor", OptionKind::integer, "Extra wait after page load, within timeout", 0, 0,
+              30000, false},
+    OptionDef{"waitForSelector", OptionKind::string,
+              "Wait for a CSS selector to match an element (presence, not visibility), within "
+              "timeout.",
+              0, 0, 2048, false},
+    OptionDef{"waitForText", OptionKind::string,
+              "Wait for literal case-sensitive body text outside scripts/styles/templates, within "
+              "timeout.",
+              0, 0, 4096, false},
+    OptionDef{"limit", OptionKind::integer, "Maximum pages to attempt", 10, 1, 100, true},
+    OptionDef{"maxDepth", OptionKind::integer, "Maximum link depth from the start URL", 1, 0, 5,
+              true},
+};
+
+const OptionDef *find_option(std::string_view name) {
+  const auto found = std::find_if(options.begin(), options.end(),
+                                  [&](const OptionDef &option) { return name == option.name; });
+  return found == options.end() ? nullptr : &*found;
+}
+const OptionDef &known_option(std::string_view name) {
+  // Options are registered statically; a miss is a programming error.
+  if (const auto *option = find_option(name)) {
+    return *option;
   }
+  throw std::logic_error("Unregistered option: " + std::string(name));
+}
 
-  Json schema() const {
+int parse_integer(const Json &args, std::string_view name) {
+  const auto &option = known_option(name);
+  const auto it = args.find(option.name);
+  if (it == args.end()) {
+    return option.fallback;
+  }
+  if (!it->is_number_integer()) {
+    throw std::invalid_argument(std::string(name) + " must be an integer");
+  }
+  // Compare as JSON before narrowing, including unsigned integers above INT64_MAX.
+  if (*it < option.minimum || *it > option.maximum) {
+    throw std::invalid_argument(std::string(name) + " is outside the supported range");
+  }
+  return it->get<int>();
+}
+
+std::string parse_string(const Json &args, std::string_view name) {
+  const auto &option = known_option(name);
+  const auto it = args.find(option.name);
+  if (it == args.end()) {
+    return {};
+  }
+  if (!it->is_string() || it->get_ref<const std::string &>().empty() ||
+      it->get_ref<const std::string &>().size() > static_cast<size_t>(option.maximum)) {
+    throw std::invalid_argument(std::string(name) +
+                                " must be a nonempty string within its byte limit");
+  }
+  return it->get<std::string>();
+}
+
+bool parse_boolean(const Json &args, std::string_view name) {
+  const auto &option = known_option(name);
+  const auto it = args.find(option.name);
+  if (it == args.end()) {
+    return option.fallback != 0;
+  }
+  if (!it->is_boolean()) {
+    throw std::invalid_argument(std::string(name) + " must be boolean");
+  }
+  return it->get<bool>();
+}
+
+Json schema_of(const OptionDef &option) {
+  switch (option.kind) {
+  case OptionKind::integer:
+    return {{"type", "integer"},
+            {"minimum", option.minimum},
+            {"maximum", option.maximum},
+            {"default", option.fallback},
+            {"description", option.description}};
+  case OptionKind::string:
     // JSON Schema lengths count characters; validation also enforces UTF-8 bytes.
     return {{"type", "string"},
             {"minLength", 1},
-            {"maxLength", maximum},
-            {"description",
-             std::string(description) + " Maximum " + std::to_string(maximum) + " UTF-8 bytes."}};
+            {"maxLength", option.maximum},
+            {"description", std::string(option.description) + " Maximum " +
+                                std::to_string(option.maximum) + " UTF-8 bytes."}};
+  case OptionKind::boolean:
+    return {{"type", "boolean"},
+            {"default", option.fallback != 0},
+            {"description", option.description}};
+  case OptionKind::url:
+    return {{"type", "string"}, {"description", option.description}};
+  case OptionKind::formats:
+    return {{"type", "array"},
+            {"minItems", 1},
+            {"items", {{"type", "string"}, {"enum", formats}}},
+            {"default", {"markdown"}},
+            {"description", option.description}};
   }
-};
-constexpr StringOption selector_option{
-    "waitForSelector", 2048,
-    "Wait for a CSS selector to match an element (presence, not visibility), within timeout."};
-constexpr StringOption text_option{
-    "waitForText", 4096,
-    "Wait for literal case-sensitive body text outside scripts/styles/templates, within timeout."};
+  throw std::logic_error("Unhandled option kind");
+}
 
-enum class Tool { scrape, crawl, map };
 Tool parse_tool(std::string_view name) {
-  if (name == "scrape") {
-    return Tool::scrape;
-  }
-  if (name == "crawl") {
-    return Tool::crawl;
-  }
-  if (name == "map") {
-    return Tool::map;
+  for (const auto &entry : tool_table) {
+    if (name == entry.name) {
+      return entry.id;
+    }
   }
   throw std::invalid_argument("Unknown tool: " + std::string(name));
 }
@@ -191,12 +263,10 @@ PageRequest parse_request(const Json &args, Tool tool) {
   if (!args.is_object()) {
     throw std::invalid_argument("arguments must be an object");
   }
-  static constexpr std::array<std::string_view, 7> common{
-      "url", "formats", "onlyMainContent", "timeout", "waitFor", "waitForSelector", "waitForText"};
   for (const auto &[key, value] : args.items()) {
     (void)value;
-    if (std::find(common.begin(), common.end(), key) == common.end() &&
-        !(tool != Tool::scrape && (key == "limit" || key == "maxDepth"))) {
+    const auto *known = find_option(key);
+    if (!known || (known->discovery_only && tool == Tool::scrape)) {
       throw std::invalid_argument("Unknown argument: " + key);
     }
   }
@@ -205,16 +275,11 @@ PageRequest parse_request(const Json &args, Tool tool) {
   }
   PageRequest request;
   request.url = normalize_url(args["url"].get_ref<const std::string &>());
-  if (args.contains("onlyMainContent")) {
-    if (!args["onlyMainContent"].is_boolean()) {
-      throw std::invalid_argument("onlyMainContent must be boolean");
-    }
-    request.only_main_content = args["onlyMainContent"].get<bool>();
-  }
-  request.timeout = std::chrono::milliseconds(timeout_option.parse(args));
-  request.wait_for = std::chrono::milliseconds(wait_option.parse(args));
-  request.wait_for_selector = selector_option.parse(args);
-  request.wait_for_text = text_option.parse(args);
+  request.only_main_content = parse_boolean(args, "onlyMainContent");
+  request.timeout = std::chrono::milliseconds(parse_integer(args, "timeout"));
+  request.wait_for = std::chrono::milliseconds(parse_integer(args, "waitFor"));
+  request.wait_for_selector = parse_string(args, "waitForSelector");
+  request.wait_for_text = parse_string(args, "waitForText");
   if (args.contains("formats")) {
     if (!args["formats"].is_array() || args["formats"].empty()) {
       throw std::invalid_argument("formats must be a nonempty array");
@@ -238,41 +303,20 @@ PageRequest parse_request(const Json &args, Tool tool) {
 
 Json make_tools() {
   Json list = Json::array();
-  Json properties{
-      {"url", {{"type", "string"}, {"description", "Absolute HTTP(S) URL without credentials"}}},
-      {"formats",
-       {{"type", "array"},
-        {"minItems", 1},
-        {"items", {{"type", "string"}, {"enum", formats}}},
-        {"default", {"markdown"}}}},
-      {"onlyMainContent", {{"type", "boolean"}, {"default", true}}},
-      {"timeout", timeout_option.schema()},
-      {"waitFor", wait_option.schema()}};
-  properties[selector_option.name] = selector_option.schema();
-  properties[text_option.name] = text_option.schema();
-  properties["timeout"]["description"] =
-      "Total per-page budget in milliseconds, including navigation and extraction";
-  properties["waitFor"]["description"] = "Extra wait after page load, within timeout";
-  constexpr std::array names{"scrape", "crawl", "map"};
-  constexpr std::array descriptions{
-      "Render a page with native Lightpanda and extract content. Markdown supports common article "
-      "elements.",
-      "Breadth-first crawl of same-origin pages. Returns pages and per-page errors; bounded by "
-      "depth, page count, 120 seconds, and result size.",
-      "Discover links with a bounded same-origin crawl. External links are listed but never "
-      "followed. Not a sitemap or search engine."};
-  for (size_t i = 0; i < names.size(); ++i) {
-    auto props = properties;
-    if (i != 0) {
-      props["limit"] = limit_option.schema();
-      props["maxDepth"] = depth_option.schema();
+  for (const auto &entry : tool_table) {
+    Json properties = Json::object();
+    for (const auto &option : options) {
+      if (option.discovery_only && entry.id == Tool::scrape) {
+        continue;
+      }
+      properties[option.name] = schema_of(option);
     }
     list.push_back(
-        {{"name", names[i]},
-         {"description", descriptions[i]},
+        {{"name", entry.name},
+         {"description", entry.description},
          {"inputSchema",
           {{"type", "object"},
-           {"properties", std::move(props)},
+           {"properties", std::move(properties)},
            {"required", {"url"}},
            {"additionalProperties", false}}},
          {"annotations",
@@ -294,14 +338,15 @@ Json execute(Browser &browser, const std::string &name, const Json &args) {
   if (tool == Tool::scrape) {
     return browser.scrape(request);
   }
-  const int limit = limit_option.parse(args), max_depth = depth_option.parse(args);
+  const int limit = parse_integer(args, "limit"), max_depth = parse_integer(args, "maxDepth");
   const std::string start_origin(origin(request.url));
   const auto deadline = Clock::now() + 120s;
   const auto page_timeout = request.timeout;
-  const bool return_links = has_format(request.formats, "links");
-  if (tool == Tool::map) {
-    request.formats = {"links"};
-  }
+  // Each page derives its formats from this immutable base instead of mutating
+  // one shared vector with paired push/pop calls.
+  const std::vector<std::string> page_formats =
+      tool == Tool::map ? std::vector<std::string>{"links"} : request.formats;
+  const bool return_links = has_format(page_formats, "links");
   std::unordered_set<std::string> queued{request.url}, discovered, visited;
   // Set keys own frontier URLs for the whole crawl. Rehash preserves pointers
   // (not iterators), and keys are never erased, so the queue needs no second copy.
@@ -328,11 +373,9 @@ Json execute(Browser &browser, const std::string &name, const Json &args) {
     request.url = url;
     request.timeout = std::min(page_timeout, remaining);
     // Leaf pages need no frontier links unless the caller requested them.
-    const bool need_links = tool == Tool::map || return_links || depth < max_depth;
-    if (need_links && !has_format(request.formats, "links")) {
+    request.formats = page_formats;
+    if ((return_links || depth < max_depth) && !has_format(request.formats, "links")) {
       request.formats.push_back("links");
-    } else if (!need_links && has_format(request.formats, "links")) {
-      request.formats.pop_back(); // only the automatically appended links format
     }
     try {
       auto page = browser.scrape(request);

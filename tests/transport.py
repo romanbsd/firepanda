@@ -15,6 +15,8 @@ import unittest
 BINARY = sys.argv[1]
 sys.argv = sys.argv[:1]
 
+from harness import META, message as envelope
+
 
 def frame(payload, opcode=1, final=True):
     if isinstance(payload, dict):
@@ -182,9 +184,9 @@ class Transport(unittest.TestCase):
 
     def send(self, timeout=1000):
         self.sequence += 1
-        self.process.stdin.write(json.dumps({"jsonrpc": "2.0", "id": self.sequence, "method": "tools/call", "params": {
-            "_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28"}, "name": "scrape",
-            "arguments": {"url": "https://example.com", "timeout": timeout}}}) + "\n")
+        self.process.stdin.write(json.dumps(envelope(
+            self.sequence, "tools/call", _meta=META, name="scrape",
+            arguments={"url": "https://example.com", "timeout": timeout})) + "\n")
         self.process.stdin.flush()
 
     def receive(self):

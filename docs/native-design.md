@@ -16,8 +16,11 @@ CDP replies and events share this connection. Only bounded page-load and main-do
 active session; arbitrary event bodies are discarded immediately.
 cpp-httplib's blocking read timeout can restart while processing control frames
 or fragments. A deadline worker exists only while a page operation is active;
-it shuts down a duplicate socket descriptor on timeout or shutdown. Owning the
-duplicate prevents descriptor reuse during retries from targeting another file.
+it watches a duplicate descriptor registered only after connect() succeeds and
+shuts it down at the operation deadline or on a stop signal. The signal handler
+and the worker's destructor wake it through a non-blocking self-pipe, so idle
+waiting costs no periodic wakeups. Owning the duplicate prevents descriptor
+reuse during retries from targeting another file.
 The worker is joined and its descriptor closed before the operation returns.
 The shutdown flag uses a lock-free atomic shared with the signal handler.
 While idle, the main thread uses `pselect` with an atomic signal-mask transition
@@ -90,6 +93,8 @@ as a C++ library is not an established upstream integration used by this project
 
 ## Validation
 
+`tests/harness.py` provides the shared JSON-RPC client, protocol-version
+constant, and pipelined batch runner used by the suites below.
 `tests/protocol.py` checks modern and legacy wire behavior, malformed/oversized
 requests, URL/argument validation, notifications, and missing-browser errors.
 `tests/integration.py` starts an actual native Lightpanda child and a local HTTP

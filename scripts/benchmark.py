@@ -8,8 +8,12 @@ from pathlib import Path
 import platform
 import statistics
 import subprocess
+import sys
 import threading
 import time
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
+from harness import Service
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--binary', type=Path, required=True)
@@ -47,7 +51,6 @@ class Fixture(http.server.BaseHTTPRequestHandler):
 server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Fixture)
 threading.Thread(target=server.serve_forever, daemon=True).start()
 base = f'http://127.0.0.1:{server.server_port}'
-sequence = 0
 with args.lightpanda.open('rb') as source:
     browser_digest = hashlib.file_digest(source, 'sha256').hexdigest()
 report = {'platform': platform.system(), 'architecture': platform.machine(),
@@ -55,23 +58,16 @@ report = {'platform': platform.system(), 'architecture': platform.machine(),
           'binary_bytes': args.binary.stat().st_size, 'iterations': args.iterations,
           'lightpanda_sha256': browser_digest,
           'clock': 'perf_counter; wall time including MCP serialization and local HTTP', 'scenarios': {}}
-process = subprocess.Popen([str(args.binary.resolve()), '--lightpanda', str(args.lightpanda.resolve()), '--idle-timeout', '0'],
-                           stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+service = Service([str(args.binary.resolve()), '--lightpanda', str(args.lightpanda.resolve()),
+                   '--idle-timeout', '0'], stderr=subprocess.DEVNULL)
 
 
 def call(path, formats, **extra):
-    global sequence
-    sequence += 1
-    message = {'jsonrpc': '2.0', 'id': sequence, 'method': 'tools/call', 'params': {
-        '_meta': {'io.modelcontextprotocol/protocolVersion': '2026-07-28'},
-        'name': 'scrape', 'arguments': {'url': base + path, 'formats': formats, 'timeout': 120000, **extra}}}
     start = time.perf_counter()
-    process.stdin.write(json.dumps(message) + '\n')
-    process.stdin.flush()
-    response = json.loads(process.stdout.readline())
+    result = service.call('tools/call', name='scrape',
+                          arguments={'url': base + path, 'formats': formats, 'timeout': 120000, **extra})
     elapsed = (time.perf_counter() - start) * 1000
-    if 'error' in response or response.get('result', {}).get('isError'):
-        raise RuntimeError(response)
+    assert not result.get('isError'), result
     return elapsed
 
 
@@ -84,12 +80,12 @@ try:
         samples = [call(name, formats, **extra) for _ in range(args.iterations)]
         report['scenarios'][name] = {'median_ms': statistics.median(samples), 'min_ms': min(samples), 'max_ms': max(samples)}
 finally:
-    process.stdin.close()
+    service.process.stdin.close()
     try:
-        process.wait(timeout=10)
+        service.process.wait(timeout=10)
     except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait()
+        service.process.kill()
+        service.process.wait()
     server.shutdown()
 text = json.dumps(report, indent=2) + '\n'
 if args.output:

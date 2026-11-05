@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <chrono>
-#include <condition_variable>
+#include <climits>
 #include <csignal>
 #include <cstdlib>
 #include <cstring>
@@ -12,6 +12,7 @@
 #include <httplib.h>
 #include <mutex>
 #include <optional>
+#include <poll.h>
 #include <spawn.h>
 #include <string_view>
 #include <sys/wait.h>
@@ -21,6 +22,34 @@
 extern char **environ;
 namespace firepanda {
 std::atomic<bool> stop_requested{false};
+// Self-pipe: the signal handler and destructor write here so deadline workers
+// wake for stop/teardown without polling. [0] is the read end, [1] the write end.
+int stop_wakeup[2] = {-1, -1};
+bool init_stop_wakeup() noexcept {
+  if (pipe(stop_wakeup) != 0) {
+    stop_wakeup[0] = stop_wakeup[1] = -1;
+    return false;
+  }
+  bool ok = true;
+  for (int descriptor : stop_wakeup) {
+    const int flags = fcntl(descriptor, F_GETFL);
+    ok = ok && flags >= 0 && fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) == 0 &&
+         fcntl(descriptor, F_SETFD, FD_CLOEXEC) == 0;
+  }
+  if (!ok) {
+    close(stop_wakeup[0]);
+    close(stop_wakeup[1]);
+    stop_wakeup[0] = stop_wakeup[1] = -1;
+  }
+  return ok;
+}
+void wake_stop_waiters() noexcept {
+  if (stop_wakeup[1] >= 0) {
+    const char byte = 0;
+    const auto ignored = write(stop_wakeup[1], &byte, 1); // Full pipe still wakes a poller.
+    (void)ignored;
+  }
+}
 using Clock = std::chrono::steady_clock;
 using namespace std::chrono_literals;
 namespace {
@@ -28,9 +57,12 @@ class CdpError : public std::runtime_error {
 public:
   using std::runtime_error::runtime_error;
 };
+// Enforces an operation deadline by shutting the watched socket down once it
+// passes or a stop signal arrives. The socket is registered only after
+// connect() succeeds, so the worker waits on one poll: the self-pipe wakes it
+// for stop/teardown, and the deadline is the timeout.
 class SocketDeadline {
   std::mutex mutex_;
-  std::condition_variable changed_;
   bool done_ = false;
   int descriptor_ = -1;
   Clock::time_point deadline_;
@@ -39,17 +71,30 @@ class SocketDeadline {
 public:
   explicit SocketDeadline(Clock::time_point deadline)
       : deadline_(deadline), worker_([this] {
-          std::unique_lock lock(mutex_);
-          while (!done_) {
-            const auto now = Clock::now();
-            const bool expired = now >= deadline_ || stop_requested.load(std::memory_order_relaxed);
-            // A socket observed before connect() can still report ENOTCONN.
-            // Retry until it connects or the owning operation finishes.
-            if (expired && descriptor_ >= 0 && shutdown(descriptor_, SHUT_RDWR) == 0) {
-              return;
+          pollfd wake{stop_wakeup[0], POLLIN, 0};
+          for (;;) {
+            {
+              std::lock_guard lock(mutex_);
+              if (done_) {
+                return;
+              }
+              if (Clock::now() >= deadline_ || stop_requested.load()) {
+                // SIGTERM/SIGINT must interrupt even a read that is still
+                // reassembling fragments; watch() may not have run yet.
+                if (descriptor_ >= 0) {
+                  shutdown(descriptor_, SHUT_RDWR);
+                }
+                return;
+              }
             }
-            changed_.wait_until(lock, expired ? now + 25ms : std::min(deadline_, now + 25ms),
-                                [this] { return done_; });
+            const auto remaining =
+                std::chrono::duration_cast<std::chrono::milliseconds>(deadline_ - Clock::now());
+            const int timeout = static_cast<int>(std::min<int64_t>(remaining.count() + 1, INT_MAX));
+            if (::poll(&wake, 1, timeout) > 0 && (wake.revents & POLLIN) != 0) {
+              char drained[32];
+              while (stop_wakeup[0] >= 0 && ::read(stop_wakeup[0], drained, sizeof drained) > 0) {
+              }
+            }
           }
         }) {}
   ~SocketDeadline() {
@@ -57,7 +102,7 @@ public:
       std::lock_guard lock(mutex_);
       done_ = true;
     }
-    changed_.notify_one();
+    wake_stop_waiters(); // The worker must not wait out a stale deadline.
     worker_.join();
     if (descriptor_ >= 0) {
       close(descriptor_);
@@ -68,11 +113,11 @@ public:
 
   void watch(int descriptor) {
     std::lock_guard lock(mutex_);
-    if (Clock::now() >= deadline_ || stop_requested.load(std::memory_order_relaxed)) {
+    if (done_ || Clock::now() >= deadline_ || stop_requested.load()) {
       throw std::runtime_error("Lightpanda operation timed out or service is stopping");
     }
-    // Own a duplicate so socket closure/reuse during connection retries cannot
-    // make the worker shut down an unrelated descriptor. Never close httplib's fd.
+    // Own a duplicate so socket closure/reuse cannot make the worker shut down
+    // an unrelated descriptor. Never close httplib's fd.
     const int duplicate = fcntl(descriptor, F_DUPFD_CLOEXEC, 0);
     if (duplicate < 0) {
       throw std::runtime_error("Cannot monitor Lightpanda socket deadline");
@@ -226,22 +271,20 @@ struct Browser::Impl {
       ws->set_connection_timeout(0, 100000);
       ws->set_read_timeout(0, 100000);
       ws->set_write_timeout(1);
-      ws->set_socket_options([this, &guard](int descriptor) {
+      socket_descriptor = -1; // Only the descriptor of the successful attempt is watched.
+      ws->set_socket_options([this](int descriptor) {
         httplib::default_socket_options(descriptor);
-        try {
-          guard.watch(descriptor);
-        } catch (...) {
-          // The pinned httplib calls this before recording ownership of the raw
-          // socket; an exception here must close it or that descriptor is lost.
-          close(descriptor);
-          throw;
-        }
         socket_descriptor = descriptor;
       });
       const auto connected = ws->connect();
       // The callback must not retain a reference to this operation's guard.
       ws->set_socket_options(httplib::default_socket_options);
       if (connected) {
+        // Watch only now: shutdown() on a socket that connect() has not
+        // completed reports ENOTCONN, and failed attempts may replace it.
+        if (socket_descriptor >= 0) {
+          guard.watch(socket_descriptor);
+        }
         return;
       }
       ws.reset();
