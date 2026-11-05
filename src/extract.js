@@ -88,6 +88,7 @@
     for (const run of text.matchAll(/`+/g)) length = Math.max(length, run[0].length + 1);
     return '`'.repeat(length);
   };
+  const blockTags = new Set(['p','div','section','article','main','ul','ol','blockquote','table','tr']);
   const render = n => {
     if (n.nodeType === 3) return escape((n.textContent || '').replace(/\s+/g, ' '));
     if (n.nodeType !== 1) return '';
@@ -120,7 +121,7 @@
     if (tag === 'li') return '\n- ' + body().trim();
     if (tag === 'br') return '\n';
     if (tag === 'hr') return '\n\n---\n\n';
-    if (['p','div','section','article','main','ul','ol','blockquote','table','tr'].includes(tag)) return '\n\n' + body().trim() + '\n\n';
+    if (blockTags.has(tag)) return '\n\n' + body().trim() + '\n\n';
     if (tag === 'td' || tag === 'th') return body() + ' | ';
     return body();
   };

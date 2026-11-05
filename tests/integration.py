@@ -58,10 +58,17 @@ def rpc(method, **params):
     return response["result"]
 
 
+def structured(result):
+    if "structuredContent" in result:
+        return result["structuredContent"]
+    # Large results omit the duplicate structured payload; the text block is JSON.
+    return json.loads(result["content"][0]["text"])
+
+
 def tool(name, **arguments):
     result = rpc("tools/call", name=name, arguments=arguments)
     assert not result.get("isError"), result
-    return result["structuredContent"]
+    return structured(result)
 
 
 try:
@@ -149,7 +156,11 @@ try:
     wide = tool("crawl", url=url + "/wide-frontier", limit=100, maxDepth=1)
     assert not wide['errors'] and wide['attempted'] == 100 and wide['truncated'], wide
     assert [page['metadata']['url'] for page in wide['pages'][1:]] == [url + f'/leaf/{i}' for i in range(99)], wide
-    budget = tool("crawl", url=url + "/budget-root", formats=['text'], limit=2, maxDepth=1)
+    budget_result = rpc("tools/call", name="crawl", arguments={
+        "url": url + "/budget-root", "formats": ['text'], "limit": 2, "maxDepth": 1})
+    assert not budget_result.get("isError"), budget_result
+    assert "structuredContent" not in budget_result, "large results must not duplicate the payload"
+    budget = structured(budget_result)
     assert not budget['errors'] and budget['truncated'] and budget['attempted'] == 2, budget.keys()
     assert len(budget['pages']) == 1 and len(budget['pages'][0]['text']) > 2 * 1024 * 1024, budget.keys()
     redirects = tool("crawl", url=url + "/redirect-root", limit=5, maxDepth=1)

@@ -50,6 +50,12 @@ with tempfile.TemporaryFile(mode="w+") as diagnostics:
     def tool(name, path="/", **arguments):
         return call("tools/call", name=name, arguments={"url": base + path, **arguments})
 
+    def structured(result):
+        if "structuredContent" in result:
+            return result["structuredContent"]
+        # Large results omit the duplicate structured payload; the text block is JSON.
+        return json.loads(result["content"][0]["text"])
+
     def descriptor_count():
         if args.leaks:  # process.pid is the leaks wrapper in this mode
             return None
@@ -66,13 +72,13 @@ with tempfile.TemporaryFile(mode="w+") as diagnostics:
             result = tool("scrape", "/large" if i % 10 == 0 else "/", formats=["markdown", "html", "links"])
             assert not result["isError"], result
             if i % 10 == 0:
-                assert len(result["structuredContent"]["markdown"]) >= 256 * 1024
-                code = tool("scrape", "/code-base")["structuredContent"]["markdown"]
+                assert len(structured(result)["markdown"]) >= 256 * 1024
+                code = structured(tool("scrape", "/code-base"))["markdown"]
                 assert "first\n\n\n```literal\nlast\n" in code
             if i % 5 == 0:
-                assert not tool("crawl", limit=3, maxDepth=1)["structuredContent"]["errors"]
-                assert len(tool("map", limit=2)["structuredContent"]["links"]) == 2
-                redirects = tool("crawl", "/redirect-root", limit=2, maxDepth=1)["structuredContent"]
+                assert not structured(tool("crawl", limit=3, maxDepth=1))["errors"]
+                assert len(structured(tool("map", limit=2))["links"]) == 2
+                redirects = structured(tool("crawl", "/redirect-root", limit=2, maxDepth=1))
                 assert len(redirects["pages"]) == 2 and not redirects["truncated"]
             if i == 0:
                 baseline_descriptors = descriptor_count()

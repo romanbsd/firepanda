@@ -13,6 +13,7 @@
 #include <mutex>
 #include <optional>
 #include <spawn.h>
+#include <string_view>
 #include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
@@ -110,6 +111,13 @@ public:
   SpawnActions &operator=(const SpawnActions &) = delete;
   posix_spawn_file_actions_t actions;
 };
+// CDP events arrive on every message of a scrape. Returning a view avoids
+// allocating a std::string for each method/session lookup.
+std::string_view string_member(const Json &object, const char *key) {
+  const auto found = object.find(key);
+  return found != object.end() && found->is_string() ? found->get_ref<const std::string &>()
+                                                     : std::string_view{};
+}
 } // namespace
 struct Browser::Impl {
   Options options;
@@ -279,17 +287,17 @@ struct Browser::Impl {
   void observe(const Json &message) {
     // CDP mixes replies and events on one socket. We only need one load flag,
     // not a queue retaining arbitrary (potentially multi-megabyte) event bodies.
-    if (message.value("method", "") == "Page.loadEventFired" &&
-        message.value("sessionId", "") == active_session) {
+    const auto method = string_member(message, "method");
+    const auto session_id = string_member(message, "sessionId");
+    if (method == "Page.loadEventFired" && session_id == active_session) {
       page_loaded = true;
     }
-    if (message.value("method", "") != "Network.responseReceived" ||
-        message.value("sessionId", "") != active_session) {
+    if (method != "Network.responseReceived" || session_id != active_session) {
       return;
     }
     const auto params = message.find("params");
     if (params == message.end() || !params->is_object() ||
-        params->value("type", "") != "Document") {
+        string_member(*params, "type") != "Document") {
       return;
     }
     const auto frame = params->find("frameId"), response = params->find("response");
@@ -343,7 +351,7 @@ struct Browser::Impl {
         observe(response);
         continue;
       }
-      if ((!session.empty() && response.value("sessionId", "") != session) ||
+      if ((!session.empty() && string_member(response, "sessionId") != session) ||
           response.contains("result") == response.contains("error")) {
         throw std::runtime_error("Malformed CDP response envelope");
       }
@@ -411,7 +419,7 @@ Json Browser::scrape(const PageRequest &request) {
     }
     b.page_loaded = false;
     const auto navigation = b.call("Page.navigate", {{"url", request.url}}, session, deadline);
-    b.main_frame = navigation.value("frameId", "");
+    b.main_frame = std::string(string_member(navigation, "frameId"));
     for (const auto &[frame, status] : b.early_document_statuses) {
       if (!b.main_frame.empty() && frame == b.main_frame) {
         b.http_status = status;

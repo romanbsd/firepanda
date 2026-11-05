@@ -3,6 +3,7 @@
 #include <cerrno>
 #include <charconv>
 #include <csignal>
+#include <cstddef>
 #include <cstring>
 #include <iostream>
 #include <optional>
@@ -53,6 +54,7 @@ bool wait_for_input(std::optional<std::chrono::steady_clock::time_point> idle_de
   }
   return ready > 0 && !firepanda::stop_requested;
 }
+constexpr std::size_t max_structured_content_bytes = 1024 * 1024;
 constexpr const char *version_key = "io.modelcontextprotocol/protocolVersion";
 const Json versions =
     Json::array({"2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"});
@@ -142,13 +144,18 @@ public:
               throw std::runtime_error(
                   "Tool result exceeds 8 MiB; select fewer output formats or pages");
             }
-            // Transfer the large text and structured payloads into the response.
+            // structuredContent repeats the whole payload. Keep it for normal
+            // results; large crawls and maps would otherwise serialize and send
+            // the data twice.
+            const bool include_structured = text.size() <= max_structured_content_bytes;
             result = Json::object();
             Json content{{"type", "text"}};
             content["text"] = std::move(text);
             result["content"] = Json::array();
             result["content"].push_back(std::move(content));
-            result["structuredContent"] = std::move(data);
+            if (include_structured) {
+              result["structuredContent"] = std::move(data);
+            }
             result["isError"] = false;
           } catch (const std::invalid_argument &e) {
             return error(id, -32602, e.what());

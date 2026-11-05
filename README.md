@@ -220,7 +220,7 @@ See [design details](docs/native-design.md) for code structure and protocol beha
 | MCP request | 1 MiB before parsing |
 | JSON nesting | 64 levels |
 | WebSocket message | 16 MiB |
-| Serialized tool data | 8 MiB; text and structured MCP fields duplicate it on the wire |
+| Serialized tool data | 8 MiB; results above 1 MiB omit the duplicate structured field |
 | Crawl page data | 4 MiB total |
 | Crawl/map total work | 120 seconds |
 | Crawl/map traversal | 100 attempts, depth 5 maximum |

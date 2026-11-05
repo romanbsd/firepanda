@@ -17,7 +17,8 @@ AppleClang 21; the sanitizer Debug build uses Homebrew Clang 23.1.4.
 - Large JSON results move through the browser/tool/MCP layers instead of being
   unnecessarily copied between layers. The pinned JSON library also moves
   rvalues through initializer lists; explicit assignments are not required to avoid copies. Structured and text MCP outputs still
-  duplicate the payload on the wire for client compatibility.
+  duplicate the payload on the wire for client compatibility up to 1 MiB;
+  larger results omit the structured field and carry the JSON text once.
 - URL normalization uses bounded scans and `from_chars`, removing recursive
   regex matching. JSON nesting is limited to 64 on both MCP and CDP input.
 - Link-only and raw-HTML-only requests skip cloning the DOM. Link extraction

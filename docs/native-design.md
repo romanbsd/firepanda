@@ -68,8 +68,9 @@ errors. No sampling, elicitation, subscriptions, or tasks are advertised.
 Requests are limited to 1 MiB before parsing, JSON nesting to 64 levels,
 WebSocket messages to 16 MiB, and
 serialized tool data to 8 MiB (text and structured data duplicate that payload
-on the MCP wire). Crawl limits are 100 pages, depth 5, 120 seconds total, 10,000
-discovered links, and 4 MiB of page data. Limits return `truncated` and per-page
+on the MCP wire up to 1 MiB; larger results omit structured data). Crawl limits
+are 100 pages, depth 5, 120 seconds total, 10,000 discovered links, and 4 MiB of
+page data. Limits return `truncated` and per-page
 errors. Calls execute serially; cancellation notifications do not interrupt a
 running call. Each page has a configurable deadline of at most 120 seconds.
 
@@ -122,7 +123,8 @@ The observer is disconnected on success and timeout, and polling works without i
 Large results transfer ownership through the pipeline. The selected JSON library
 can move rvalues through initializer lists as well as assignments; initializer lists
 should not be assumed to copy every moved value. Text and structured MCP results
-remain duplicated on the wire for client compatibility.
+remain duplicated on the wire for client compatibility up to 1 MiB; larger
+results omit the structured field and carry the JSON text once.
 
 The CMake project version feeds CLI and MCP identity. Release packaging includes
 Firepanda, both C++ dependency license notices, and documentation; Lightpanda is
