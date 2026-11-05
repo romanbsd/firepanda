@@ -38,8 +38,7 @@ target_compile_definitions(firepanda PRIVATE FIREPANDA_VERSION="${PROJECT_VERSIO
 target_include_directories(firepanda PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
 target_link_libraries(firepanda PRIVATE httplib::httplib nlohmann_json::nlohmann_json Threads::Threads)
 install(TARGETS firepanda RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
-install(FILES LICENSE THIRD_PARTY_NOTICES.md DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/firepanda")
-install(DIRECTORY LICENSES/ DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/firepanda")
+install(FILES LICENSE DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/firepanda")
 
 option(FIREPANDA_SANITIZERS "Enable address/undefined-behavior sanitizers (development only)" OFF)
 if(FIREPANDA_SANITIZERS AND NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")

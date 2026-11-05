@@ -38,7 +38,7 @@ Workflow changes from pull requests run with read-only repository permissions.
 ## Prepare a release
 
 1. Set the version in `project(firepanda VERSION ...)` in CMakeLists.txt. CLI and
-   MCP identity derive from it. Update the README/dependency notices if needed.
+   MCP identity derive from it. Update the README if needed.
 2. Run a clean Release build, CTest with Lightpanda 1.0.2, sanitizer tests, and
    formatting. Run the Linux/macOS workflows; local macOS results do not establish
    remote Linux success.
@@ -65,7 +65,7 @@ python3 scripts/package-release.py --binary build/firepanda --tag v0.2.0
 
 The script writes `dist/firepanda-VERSION-OS-ARCH.tar.gz` and an accompanying
 `.sha256`. The archive includes `bin/firepanda`, README, docs, the Lightpanda
-installer, Firepanda's MIT license, and both C++ dependency MIT notices. It does
+installer, and Firepanda's MIT license. It does
 not bundle Lightpanda, local configuration, build caches, or review artifacts.
 Architecture is detected from the native runner; these are not universal macOS
 binaries or cross-compiled Linux binaries. Ubuntu-built binaries depend on the

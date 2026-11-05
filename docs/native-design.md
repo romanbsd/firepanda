@@ -127,5 +127,5 @@ remain duplicated on the wire for client compatibility up to 1 MiB; larger
 results omit the structured field and carry the JSON text once.
 
 The CMake project version feeds CLI and MCP identity. Release packaging includes
-Firepanda, both C++ dependency license notices, and documentation; Lightpanda is
+Firepanda, its MIT license, and documentation; Lightpanda is
 installed separately.

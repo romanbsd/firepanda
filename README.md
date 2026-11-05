@@ -55,8 +55,8 @@ cmake --install build --prefix "$HOME/.local"
 "$HOME/.local/bin/firepanda" --version
 ```
 
-Release archives, when published, contain the binary, documentation, and license
-notices. Lightpanda is installed separately. After extracting an archive and
+Release archives, when published, contain the binary, documentation, and license.
+Lightpanda is installed separately. After extracting an archive and
 entering its directory, use the included installer and prebuilt executable:
 
 ```sh
@@ -302,6 +302,5 @@ JavaScript in Lightpanda and can access whatever network that process can reach;
 a private control socket is not network isolation. Use appropriate egress controls
 when browsing untrusted URLs or exposing tools to other users.
 
-Firepanda is [MIT licensed](LICENSE). Its C++ dependencies are MIT licensed;
-[third-party notices](THIRD_PARTY_NOTICES.md) are included in release archives.
+Firepanda is [MIT licensed](LICENSE). Its C++ dependencies are MIT licensed.
 Lightpanda is downloaded separately under its own upstream license.

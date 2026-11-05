@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Package the tested native binary and notices; Lightpanda is installed separately."""
+"""Package the tested native binary, license, and documentation; Lightpanda is installed separately."""
 import argparse
 import hashlib
 from pathlib import Path
@@ -31,10 +31,9 @@ with tempfile.TemporaryDirectory() as directory:
     stage = Path(directory) / name
     (stage / 'bin').mkdir(parents=True)
     shutil.copy2(args.binary, stage / 'bin/firepanda')
-    for file in ('README.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md'):
-        shutil.copy2(ROOT / file, stage / file)
-    for folder in ('LICENSES', 'docs'):
-        shutil.copytree(ROOT / folder, stage / folder)
+    shutil.copy2(ROOT / 'README.md', stage / 'README.md')
+    shutil.copy2(ROOT / 'LICENSE', stage / 'LICENSE')
+    shutil.copytree(ROOT / 'docs', stage / 'docs')
     (stage / 'scripts').mkdir()
     shutil.copy2(ROOT / 'scripts/install-lightpanda.py', stage / 'scripts/install-lightpanda.py')
     with tarfile.open(archive, 'w:gz') as output:
