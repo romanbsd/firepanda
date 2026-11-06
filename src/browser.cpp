@@ -650,9 +650,12 @@ Json Browser::scrape(const PageRequest &request) {
   try {
     // httplib's timeout is per read. Continuous control frames or fragments can
     // keep a read busy indefinitely, so enforce the operation deadline separately.
-    SocketDeadline guard(deadline);
-    auto connection = b.checkout(std::min(deadline, Clock::now() + 10s), guard);
+    auto guard = std::make_unique<SocketDeadline>(deadline);
+    auto connection = b.checkout(std::min(deadline, Clock::now() + 10s), *guard);
     auto result = run_scrape(*connection, request, deadline);
+    // Stop the deadline watcher before the connection returns to the pool: a
+    // late shutdown() must not hit a socket a later page reuses.
+    guard.reset();
     b.pool->give_back(std::move(connection));
     b.idle_since = Clock::now(); // Inactivity starts after work completes, not when it starts.
     return result;

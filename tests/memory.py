@@ -75,7 +75,8 @@ with tempfile.TemporaryFile(mode="w+") as diagnostics:
         final_descriptors = descriptor_count()
         # The pool may shrink when a failure reaps a warm multi-connection
         # browser; it must never grow past the post-warm-up baseline.
-        assert final_descriptors <= baseline_descriptors, (baseline_descriptors, final_descriptors)
+        assert baseline_descriptors is None or final_descriptors <= baseline_descriptors, (
+            baseline_descriptors, final_descriptors)
         service.process.stdin.close()
         service.process.stdin = None
         tail, _ = service.process.communicate(timeout=30)

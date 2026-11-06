@@ -13,7 +13,7 @@ import threading
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
-from harness import Service
+from harness import Service, structured
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--binary', type=Path, required=True)
@@ -79,6 +79,8 @@ def crawl(concurrency):
                                      'timeout': 120000, 'maxConcurrency': concurrency})
     elapsed = (time.perf_counter() - start) * 1000
     assert not result.get('isError'), result
+    payload = structured(result)
+    assert payload['attempted'] == 51 and not payload['errors'], payload
     return elapsed
 
 
