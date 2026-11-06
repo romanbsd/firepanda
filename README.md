@@ -283,14 +283,23 @@ cmake --build build-sanitize --parallel 2
 ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 \
 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
   ctest --test-dir build-sanitize --output-on-failure
+
+cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug \
+  -DFIREPANDA_TSAN=ON \
+  -DFIREPANDA_TEST_LIGHTPANDA="$PWD/.local/bin/lightpanda"
+cmake --build build-tsan --parallel 2
+TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1 \
+  ctest --test-dir build-tsan --output-on-failure
 ```
 
 On macOS, use Homebrew LLVM if Apple's sanitizer runtime lacks leak detection;
 pass `-DCMAKE_CXX_COMPILER="$(brew --prefix llvm)/bin/clang++"` when creating the
-sanitizer build. The regular macOS build also supports the `memory-check` target
-using the system `leaks` tool.
+sanitizer build. ThreadSanitizer works with the system Clang on Apple silicon. The
+sanitizer and ThreadSanitizer builds are mutually exclusive. The regular macOS
+build also supports the `memory-check` target using the system `leaks` tool.
 
-CI runs macOS/Linux builds, Linux sanitizers, and C++ formatting. A weekly/manual
+CI runs macOS/Linux builds, Linux sanitizers and ThreadSanitizer, and C++ formatting.
+A weekly/manual
 [dependency workflow](.github/workflows/bump-fetchcontent.yml) updates FetchContent
 release tags, tests the candidate, and opens a pull request. No automatic merge is
 performed. See [contributing and release maintenance](docs/releasing.md).

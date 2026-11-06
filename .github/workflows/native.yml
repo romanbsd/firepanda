@@ -53,3 +53,17 @@ jobs:
       - run: cmake -S . -B build-sanitize -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_BUILD_TYPE=Debug -DFIREPANDA_SANITIZERS=ON -DFIREPANDA_TEST_LIGHTPANDA="$PWD/.local/bin/lightpanda"
       - run: cmake --build build-sanitize --parallel 2
       - run: ctest --test-dir build-sanitize --output-on-failure
+  tsan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - run: python3 scripts/install-lightpanda.py --release 1.0.2
+      - run: cmake -S . -B build-tsan -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_BUILD_TYPE=Debug -DFIREPANDA_TSAN=ON -DFIREPANDA_TEST_LIGHTPANDA="$PWD/.local/bin/lightpanda"
+      - run: cmake --build build-tsan --parallel 2
+      - run: ctest --test-dir build-tsan --output-on-failure

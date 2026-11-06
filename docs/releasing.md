@@ -6,7 +6,8 @@ Build from a clean directory with the selected dependency tags, run the full
 CTest suite with native Lightpanda, and check C++ formatting. Browser-dependent
 tests require `FIREPANDA_TEST_LIGHTPANDA`; without it only offline/protocol tests run.
 For ownership, transport, or memory changes, also run the sanitizer configuration
-from the README. Describe any validation that could not be run.
+from the README. For concurrency changes, run the ThreadSanitizer configuration
+too. Describe any validation that could not be run.
 
 ## Dependency updates
 
@@ -39,9 +40,9 @@ Workflow changes from pull requests run with read-only repository permissions.
 
 1. Set the version in `project(firepanda VERSION ...)` in CMakeLists.txt. CLI and
    MCP identity derive from it. Update the README if needed.
-2. Run a clean Release build, CTest with Lightpanda 1.0.2, sanitizer tests, and
-   formatting. Run the Linux/macOS workflows; local macOS results do not establish
-   remote Linux success.
+2. Run a clean Release build, CTest with Lightpanda 1.0.2, sanitizer and
+   ThreadSanitizer tests, and formatting. Run the Linux/macOS workflows; local
+   macOS results do not establish remote Linux success.
 3. Inspect the files to publish. Local MCP configuration, build outputs,
    downloaded browsers, and review evidence should stay outside source/release archives.
 4. Commit the reviewed source, create a matching `vMAJOR.MINOR.PATCH` tag, and push
