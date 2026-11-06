@@ -459,7 +459,6 @@ Json run_scrape(Connection &c, const PageRequest &request, Clock::time_point dea
   c.call("Target.disposeBrowserContext", {{"browserContextId", context}}, "", deadline);
   return result;
 }
-} // namespace
 // Fixed page-worker pool. Crawl/map submit every fetch here instead of creating
 // one OS thread per page; threads are created lazily up to the configured
 // window and reused for later pages.
@@ -496,6 +495,7 @@ public:
   }
   // Main thread only, before dispatch: the crawl window is the pool ceiling.
   void set_limit(size_t limit) {
+    std::lock_guard lock(mutex_);
     limit_ = std::max<size_t>(limit, 1);
   }
   void submit(std::packaged_task<void()> task) {
@@ -512,10 +512,13 @@ public:
     ready_.notify_one();
   }
   void shutdown() {
+    // Move queued tasks out under the lock; destroying them joins deadline
+    // watchers and closes connections, which must not block other workers.
+    std::deque<std::packaged_task<void()>> dropped;
     {
       std::lock_guard lock(mutex_);
       stop_ = true;
-      queue_.clear();
+      dropped.swap(queue_);
     }
     ready_.notify_all();
     for (auto &thread : threads_) {
@@ -526,6 +529,7 @@ public:
     threads_.clear();
   }
 };
+} // namespace
 // Process state (directory, pid, idle_since) is touched only on the main
 // thread, and only while no page worker runs: connections are checked out
 // during dispatch and every failure path drains workers before release().
@@ -779,7 +783,7 @@ std::future<Json> Browser::scrape_async(PageRequest request) {
   }
   return future;
 }
-void Browser::set_parallelism(std::size_t limit) {
+void Browser::set_parallelism(size_t limit) {
   impl_->tasks.set_limit(limit);
 }
 

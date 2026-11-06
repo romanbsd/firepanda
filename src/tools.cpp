@@ -342,7 +342,7 @@ Json execute(Browser &browser, const std::string &name, const Json &args) {
   }
   const int limit = parse_integer(args, "limit"), max_depth = parse_integer(args, "maxDepth");
   const int concurrency = parse_integer(args, "maxConcurrency");
-  browser.set_parallelism(static_cast<std::size_t>(concurrency));
+  browser.set_parallelism(static_cast<size_t>(concurrency));
   const std::string start_origin(origin(request.url));
   const auto deadline = Clock::now() + 120s;
   const auto page_timeout = request.timeout;

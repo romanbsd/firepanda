@@ -40,7 +40,10 @@ the main thread fills a window of at most `maxConcurrency` pages by checking
 out pooled connections (launching the browser if needed), then consumes results
 in dispatch order. Consumption order equals sequential breadth-first order, so
 pages, links, and errors are identical to a serial crawl even though fetches
-overlap. Each scrape still uses a fresh browser context, navigates once, waits
+overlap. Fetches run on a fixed pool of page workers sized to `maxConcurrency`
+and reused across pages, so a crawl creates threads once instead of one per
+page; each page's deadline guard stops before its connection returns to the
+pool. Each scrape still uses a fresh browser context, navigates once, waits
 for `Page.loadEventFired`, evaluates one projection of the DOM, then disposes
 the context. Requested formats alone cross the socket. Extra `waitFor` is
 available for scripts that continue after load. There is no claim of

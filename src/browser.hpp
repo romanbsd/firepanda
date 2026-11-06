@@ -43,14 +43,18 @@ public:
   Browser(const Browser &) = delete;
   Browser &operator=(const Browser &) = delete;
   Json scrape(const PageRequest &request);
-  // Fetch one page on a worker thread over a pooled CDP connection. The main
+  // Fetch one page on a pool worker over a pooled CDP connection. The main
   // thread connects first (launching the browser if needed), so only one
   // thread ever spawns the process; failures surface through the returned
   // future without releasing the browser, which the crawl loop reaps after
   // draining sibling pages.
   std::future<Json> scrape_async(PageRequest request);
   // Size the fixed page-worker pool to the crawl window (crawl/map only).
-  void set_parallelism(std::size_t limit);
+  // Main thread only, before dispatch: values below 1 are clamped to 1,
+  // already-running workers are not shrunk, and callers must not have more
+  // than `limit` calls outstanding (each checks out its connection and starts
+  // its deadline before the task is queued).
+  void set_parallelism(size_t limit);
   // Record completed page work for the idle deadline. Main thread only.
   void page_completed();
   // Reap the managed browser and every pooled connection; the next operation
