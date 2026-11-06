@@ -342,6 +342,7 @@ Json execute(Browser &browser, const std::string &name, const Json &args) {
   }
   const int limit = parse_integer(args, "limit"), max_depth = parse_integer(args, "maxDepth");
   const int concurrency = parse_integer(args, "maxConcurrency");
+  browser.set_parallelism(static_cast<std::size_t>(concurrency));
   const std::string start_origin(origin(request.url));
   const auto deadline = Clock::now() + 120s;
   const auto page_timeout = request.timeout;
@@ -372,8 +373,9 @@ Json execute(Browser &browser, const std::string &name, const Json &args) {
     int depth;
   };
   std::deque<Inflight> inflight;
-  // std::async futures block in their destructors. Wait for any worker that
-  // outlives an early exit so browser teardown can never race a page thread.
+  // Wait for any page still in flight on an early exit so browser teardown can
+  // never race a page worker. Pool futures do not block on destruction, but a
+  // running task must still finish before release() drops its connection.
   struct Drain {
     std::deque<Inflight> &pending;
     ~Drain() {
@@ -500,7 +502,6 @@ Json execute(Browser &browser, const std::string &name, const Json &args) {
         inflight.pop_front();
         try {
           Json sibling_page = sibling.page.get();
-          browser.page_completed();
           record(sibling.depth, std::move(sibling_page));
         } catch (const std::exception &sibling_error) {
           errors.push_back({{"url", *sibling.url}, {"error", sibling_error.what()}});

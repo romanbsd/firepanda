@@ -3,9 +3,11 @@
 #include <algorithm>
 #include <cerrno>
 #include <chrono>
+#include <condition_variable>
 #include <csignal>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <fcntl.h>
 #include <filesystem>
 #include <httplib.h>
@@ -57,11 +59,13 @@ public:
   using std::runtime_error::runtime_error;
 };
 // Enforces an operation deadline by shutting the watched socket down once it
-// passes or a stop signal arrives. The socket is registered only after
-// connect() succeeds, so the worker waits on one poll: its private wake pipe
-// signals teardown, the shared self-pipe signals stop, and the deadline is
-// the timeout. Each guard owns its pipe because concurrent workers draining
-// the shared pipe would steal a sibling's teardown byte and stall its join.
+// passes or a stop signal arrives. The worker starts when watch() registers a
+// socket after connect() succeeds; before that there is nothing to shut down
+// and the connect loop enforces the deadline itself. The worker waits on one
+// poll: its private wake pipe signals teardown, the shared self-pipe signals
+// stop, and the deadline is the timeout. Each guard owns its pipe because
+// concurrent workers draining the shared pipe would steal a sibling's
+// teardown byte and stall its join.
 class SocketDeadline {
   std::mutex mutex_;
   bool done_ = false;
@@ -86,42 +90,6 @@ public:
     } else {
       wake_[0] = wake_[1] = -1;
     }
-    worker_ = std::thread([this] {
-      pollfd watches[2]{{stop_wakeup[0], POLLIN, 0}, {wake_[0], POLLIN, 0}};
-      for (;;) {
-        {
-          std::lock_guard lock(mutex_);
-          if (done_) {
-            return;
-          }
-          if (Clock::now() >= deadline_ || stop_requested.load()) {
-            // SIGTERM/SIGINT must interrupt even a read that is still
-            // reassembling fragments; watch() may not have run yet.
-            if (descriptor_ >= 0) {
-              shutdown(descriptor_, SHUT_RDWR);
-            }
-            return;
-          }
-        }
-        const auto remaining =
-            std::chrono::duration_cast<std::chrono::milliseconds>(deadline_ - Clock::now());
-        // Sibling workers may drain the shared stop byte before this worker
-        // re-enters poll(). Cap the wait so a missed byte still re-checks
-        // stop_requested promptly; teardown uses the private pipe instead.
-        const int timeout = static_cast<int>(std::clamp<int64_t>(remaining.count() + 1, 0, 250));
-        if (::poll(watches, 2, timeout) > 0) {
-          char drained[32];
-          if ((watches[0].revents & POLLIN) != 0) {
-            while (stop_wakeup[0] >= 0 && ::read(stop_wakeup[0], drained, sizeof drained) > 0) {
-            }
-          }
-          if ((watches[1].revents & POLLIN) != 0) {
-            while (wake_[0] >= 0 && ::read(wake_[0], drained, sizeof drained) > 0) {
-            }
-          }
-        }
-      }
-    });
   }
   ~SocketDeadline() {
     {
@@ -135,7 +103,9 @@ public:
     } else {
       wake_stop_waiters(); // Fall back to the shared pipe if the private one failed.
     }
-    worker_.join();
+    if (worker_.joinable()) {
+      worker_.join();
+    }
     if (descriptor_ >= 0) {
       close(descriptor_);
     }
@@ -163,6 +133,46 @@ public:
       close(descriptor_);
     }
     descriptor_ = duplicate;
+    // Start lazily on the first watched socket: a guard created before connect
+    // must not spin a thread that polls with nothing to shut down.
+    if (!worker_.joinable()) {
+      worker_ = std::thread([this] {
+        pollfd watches[2]{{stop_wakeup[0], POLLIN, 0}, {wake_[0], POLLIN, 0}};
+        for (;;) {
+          {
+            std::lock_guard lock(mutex_);
+            if (done_) {
+              return;
+            }
+            if (Clock::now() >= deadline_ || stop_requested.load()) {
+              // SIGTERM/SIGINT must interrupt even a read that is still
+              // reassembling fragments; watch() may not have run yet.
+              if (descriptor_ >= 0) {
+                shutdown(descriptor_, SHUT_RDWR);
+              }
+              return;
+            }
+          }
+          const auto remaining =
+              std::chrono::duration_cast<std::chrono::milliseconds>(deadline_ - Clock::now());
+          // Sibling workers may drain the shared stop byte before this worker
+          // re-enters poll(). Cap the wait so a missed byte still re-checks
+          // stop_requested promptly; teardown uses the private pipe instead.
+          const int timeout = static_cast<int>(std::clamp<int64_t>(remaining.count() + 1, 0, 250));
+          if (::poll(watches, 2, timeout) > 0) {
+            char drained[32];
+            if ((watches[0].revents & POLLIN) != 0) {
+              while (stop_wakeup[0] >= 0 && ::read(stop_wakeup[0], drained, sizeof drained) > 0) {
+              }
+            }
+            if ((watches[1].revents & POLLIN) != 0) {
+              while (wake_[0] >= 0 && ::read(wake_[0], drained, sizeof drained) > 0) {
+              }
+            }
+          }
+        }
+      });
+    }
   }
 };
 
@@ -450,6 +460,72 @@ Json run_scrape(Connection &c, const PageRequest &request, Clock::time_point dea
   return result;
 }
 } // namespace
+// Fixed page-worker pool. Crawl/map submit every fetch here instead of creating
+// one OS thread per page; threads are created lazily up to the configured
+// window and reused for later pages.
+class TaskPool {
+  std::mutex mutex_;
+  std::condition_variable ready_;
+  std::deque<std::packaged_task<void()>> queue_;
+  std::vector<std::thread> threads_;
+  size_t limit_ = 1;
+  bool stop_ = false;
+
+  void run() {
+    for (;;) {
+      std::packaged_task<void()> task;
+      {
+        std::unique_lock lock(mutex_);
+        ready_.wait(lock, [this] { return stop_ || !queue_.empty(); });
+        if (stop_) {
+          return; // Shutdown drops queued pages; their futures report it as broken.
+        }
+        task = std::move(queue_.front());
+        queue_.pop_front();
+      }
+      task();
+    }
+  }
+
+public:
+  TaskPool() = default;
+  TaskPool(const TaskPool &) = delete;
+  TaskPool &operator=(const TaskPool &) = delete;
+  ~TaskPool() {
+    shutdown();
+  }
+  // Main thread only, before dispatch: the crawl window is the pool ceiling.
+  void set_limit(size_t limit) {
+    limit_ = std::max<size_t>(limit, 1);
+  }
+  void submit(std::packaged_task<void()> task) {
+    std::lock_guard lock(mutex_);
+    if (stop_) {
+      throw std::runtime_error("Service is stopping");
+    }
+    // Spawn before queueing: if thread creation fails, no task is left behind
+    // that nothing is guaranteed to run.
+    if (threads_.size() < limit_) {
+      threads_.emplace_back([this] { run(); });
+    }
+    queue_.push_back(std::move(task));
+    ready_.notify_one();
+  }
+  void shutdown() {
+    {
+      std::lock_guard lock(mutex_);
+      stop_ = true;
+      queue_.clear();
+    }
+    ready_.notify_all();
+    for (auto &thread : threads_) {
+      if (thread.joinable()) {
+        thread.join();
+      }
+    }
+    threads_.clear();
+  }
+};
 // Process state (directory, pid, idle_since) is touched only on the main
 // thread, and only while no page worker runs: connections are checked out
 // during dispatch and every failure path drains workers before release().
@@ -474,8 +550,10 @@ struct Browser::Impl {
   std::optional<Clock::time_point> idle_since;
   const bool owns_process;
   std::shared_ptr<Pool> pool = std::make_shared<Pool>();
+  TaskPool tasks;
   explicit Impl(Options o) : options(std::move(o)), owns_process(options.socket.empty()) {}
   ~Impl() {
+    tasks.shutdown(); // Join page workers before their connections and child go away.
     release();
   }
   void release() {
@@ -667,6 +745,8 @@ Json Browser::scrape(const PageRequest &request) {
   }
 }
 std::future<Json> Browser::scrape_async(PageRequest request) {
+  auto promise = std::make_shared<std::promise<Json>>();
+  auto future = promise->get_future();
   try {
     auto &b = *impl_;
     b.idle_since.reset();
@@ -674,27 +754,33 @@ std::future<Json> Browser::scrape_async(PageRequest request) {
     // The guard starts before checkout so a stalled connect still hits the deadline.
     auto guard = std::make_unique<SocketDeadline>(deadline);
     auto connection = b.checkout(std::min(deadline, Clock::now() + 10s), *guard);
-    auto pool = b.pool;
-    return std::async(std::launch::async,
-                      [pool, connection = std::move(connection), request = std::move(request),
-                       deadline, guard = std::move(guard)]() mutable {
-                        auto result = run_scrape(*connection, request, deadline);
-                        // Stop the deadline watcher before the connection returns to
-                        // the pool: this async closure outlives the future, so a live
-                        // guard could shutdown() a socket reused by a later page.
-                        guard.reset();
-                        // Only healthy connections return to the pool; an error destroys
-                        // this one and the crawl loop reaps the browser after draining.
-                        pool->give_back(std::move(connection));
-                        return result;
-                      });
+    std::packaged_task<void()> task([pool = b.pool, connection = std::move(connection),
+                                     request = std::move(request), deadline,
+                                     guard = std::move(guard), promise]() mutable {
+      try {
+        auto result = run_scrape(*connection, request, deadline);
+        // Stop the deadline watcher before the connection returns to the
+        // pool: the task outlives this scope, so a live guard could
+        // shutdown() a socket reused by a later page.
+        guard.reset();
+        // Only healthy connections return to the pool; an error destroys
+        // this one and the crawl loop reaps the browser after draining.
+        pool->give_back(std::move(connection));
+        promise->set_value(std::move(result));
+      } catch (...) {
+        promise->set_exception(std::current_exception());
+      }
+    });
+    b.tasks.submit(std::move(task));
   } catch (...) {
     // Connect/launch failures behave like page errors: the crawl loop records
     // them and reaps the browser without a worker having run.
-    std::promise<Json> failed;
-    failed.set_exception(std::current_exception());
-    return failed.get_future();
+    promise->set_exception(std::current_exception());
   }
+  return future;
+}
+void Browser::set_parallelism(std::size_t limit) {
+  impl_->tasks.set_limit(limit);
 }
 
 } // namespace firepanda

@@ -49,6 +49,8 @@ public:
   // future without releasing the browser, which the crawl loop reaps after
   // draining sibling pages.
   std::future<Json> scrape_async(PageRequest request);
+  // Size the fixed page-worker pool to the crawl window (crawl/map only).
+  void set_parallelism(std::size_t limit);
   // Record completed page work for the idle deadline. Main thread only.
   void page_completed();
   // Reap the managed browser and every pooled connection; the next operation
