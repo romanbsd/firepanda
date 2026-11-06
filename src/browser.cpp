@@ -26,23 +26,26 @@ std::atomic<bool> stop_requested{false};
 // Self-pipe: the signal handler and destructor write here so deadline workers
 // wake for stop/teardown without polling. [0] is the read end, [1] the write end.
 int stop_wakeup[2] = {-1, -1};
-bool init_stop_wakeup() noexcept {
-  if (pipe(stop_wakeup) != 0) {
-    stop_wakeup[0] = stop_wakeup[1] = -1;
+// Non-blocking, close-on-exec pipe used for signal and teardown wakeups.
+static bool make_wakeup_pipe(int (&fds)[2]) noexcept {
+  if (pipe(fds) != 0) {
+    fds[0] = fds[1] = -1;
     return false;
   }
-  bool ok = true;
-  for (int descriptor : stop_wakeup) {
+  for (int descriptor : fds) {
     const int flags = fcntl(descriptor, F_GETFL);
-    ok = ok && flags >= 0 && fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) == 0 &&
-         fcntl(descriptor, F_SETFD, FD_CLOEXEC) == 0;
+    if (flags < 0 || fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) != 0 ||
+        fcntl(descriptor, F_SETFD, FD_CLOEXEC) != 0) {
+      close(fds[0]);
+      close(fds[1]);
+      fds[0] = fds[1] = -1;
+      return false;
+    }
   }
-  if (!ok) {
-    close(stop_wakeup[0]);
-    close(stop_wakeup[1]);
-    stop_wakeup[0] = stop_wakeup[1] = -1;
-  }
-  return ok;
+  return true;
+}
+bool init_stop_wakeup() noexcept {
+  return make_wakeup_pipe(stop_wakeup);
 }
 void wake_stop_waiters() noexcept {
   if (stop_wakeup[1] >= 0) {
@@ -51,9 +54,10 @@ void wake_stop_waiters() noexcept {
     (void)ignored;
   }
 }
-using Clock = std::chrono::steady_clock;
 using namespace std::chrono_literals;
 namespace {
+constexpr std::string_view operation_stopped =
+    "Lightpanda operation timed out or service is stopping";
 class CdpError : public std::runtime_error {
 public:
   using std::runtime_error::runtime_error;
@@ -76,20 +80,7 @@ class SocketDeadline {
 
 public:
   explicit SocketDeadline(Clock::time_point deadline) : deadline_(deadline) {
-    if (pipe(wake_) == 0) {
-      for (int descriptor : wake_) {
-        const int flags = fcntl(descriptor, F_GETFL);
-        if (flags < 0 || fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) != 0 ||
-            fcntl(descriptor, F_SETFD, FD_CLOEXEC) != 0) {
-          close(wake_[0]);
-          close(wake_[1]);
-          wake_[0] = wake_[1] = -1;
-          break;
-        }
-      }
-    } else {
-      wake_[0] = wake_[1] = -1;
-    }
+    make_wakeup_pipe(wake_); // Failure leaves both descriptors -1; teardown uses the shared pipe.
   }
   ~SocketDeadline() {
     {
@@ -121,7 +112,7 @@ public:
   void watch(int descriptor) {
     std::lock_guard lock(mutex_);
     if (done_ || Clock::now() >= deadline_ || stop_requested.load()) {
-      throw std::runtime_error("Lightpanda operation timed out or service is stopping");
+      throw std::runtime_error(std::string(operation_stopped));
     }
     // Own a duplicate so socket closure/reuse cannot make the worker shut down
     // an unrelated descriptor. Never close httplib's fd.
@@ -236,7 +227,7 @@ struct Connection {
       std::string message;
       const auto result = ws->read(message);
       if (Clock::now() >= deadline || stop_requested.load(std::memory_order_relaxed)) {
-        throw std::runtime_error("Lightpanda operation timed out or service is stopping");
+        throw std::runtime_error(std::string(operation_stopped));
       }
       if (result == httplib::ws::Timeout) {
         continue;
@@ -465,14 +456,14 @@ Json run_scrape(Connection &c, const PageRequest &request, Clock::time_point dea
 class TaskPool {
   std::mutex mutex_;
   std::condition_variable ready_;
-  std::deque<std::packaged_task<void()>> queue_;
+  std::deque<std::packaged_task<Json()>> queue_;
   std::vector<std::thread> threads_;
   size_t limit_ = 1;
   bool stop_ = false;
 
   void run() {
     for (;;) {
-      std::packaged_task<void()> task;
+      std::packaged_task<Json()> task;
       {
         std::unique_lock lock(mutex_);
         ready_.wait(lock, [this] { return stop_ || !queue_.empty(); });
@@ -498,7 +489,7 @@ public:
     std::lock_guard lock(mutex_);
     limit_ = std::max<size_t>(limit, 1);
   }
-  void submit(std::packaged_task<void()> task) {
+  void submit(std::packaged_task<Json()> task) {
     std::lock_guard lock(mutex_);
     if (stop_) {
       throw std::runtime_error("Service is stopping");
@@ -514,7 +505,7 @@ public:
   void shutdown() {
     // Move queued tasks out under the lock; destroying them joins deadline
     // watchers and closes connections, which must not block other workers.
-    std::deque<std::packaged_task<void()>> dropped;
+    std::deque<std::packaged_task<Json()>> dropped;
     {
       std::lock_guard lock(mutex_);
       stop_ = true;
@@ -749,8 +740,6 @@ Json Browser::scrape(const PageRequest &request) {
   }
 }
 std::future<Json> Browser::scrape_async(PageRequest request) {
-  auto promise = std::make_shared<std::promise<Json>>();
-  auto future = promise->get_future();
   try {
     auto &b = *impl_;
     b.idle_since.reset();
@@ -758,30 +747,29 @@ std::future<Json> Browser::scrape_async(PageRequest request) {
     // The guard starts before checkout so a stalled connect still hits the deadline.
     auto guard = std::make_unique<SocketDeadline>(deadline);
     auto connection = b.checkout(std::min(deadline, Clock::now() + 10s), *guard);
-    std::packaged_task<void()> task([pool = b.pool, connection = std::move(connection),
+    std::packaged_task<Json()> task([pool = b.pool, connection = std::move(connection),
                                      request = std::move(request), deadline,
-                                     guard = std::move(guard), promise]() mutable {
-      try {
-        auto result = run_scrape(*connection, request, deadline);
-        // Stop the deadline watcher before the connection returns to the
-        // pool: the task outlives this scope, so a live guard could
-        // shutdown() a socket reused by a later page.
-        guard.reset();
-        // Only healthy connections return to the pool; an error destroys
-        // this one and the crawl loop reaps the browser after draining.
-        pool->give_back(std::move(connection));
-        promise->set_value(std::move(result));
-      } catch (...) {
-        promise->set_exception(std::current_exception());
-      }
+                                     guard = std::move(guard)]() mutable {
+      auto result = run_scrape(*connection, request, deadline);
+      // Stop the deadline watcher before the connection returns to the
+      // pool: the task outlives this scope, so a live guard could
+      // shutdown() a socket reused by a later page.
+      guard.reset();
+      // Only healthy connections return to the pool; an error destroys
+      // this one and the crawl loop reaps the browser after draining.
+      pool->give_back(std::move(connection));
+      return result;
     });
+    auto future = task.get_future();
     b.tasks.submit(std::move(task));
+    return future;
   } catch (...) {
     // Connect/launch failures behave like page errors: the crawl loop records
     // them and reaps the browser without a worker having run.
-    promise->set_exception(std::current_exception());
+    std::promise<Json> failed;
+    failed.set_exception(std::current_exception());
+    return failed.get_future();
   }
-  return future;
 }
 void Browser::set_parallelism(size_t limit) {
   impl_->tasks.set_limit(limit);

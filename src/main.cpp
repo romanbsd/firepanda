@@ -63,9 +63,10 @@ constexpr const char *fallback_protocol_version = "2025-11-25";
 const Json versions = Json::array(
     {protocol_version, fallback_protocol_version, "2025-06-18", "2025-03-26", "2024-11-05"});
 const Json identity{{"name", "firepanda"}, {"version", FIREPANDA_VERSION}};
-Json error(Json id, int code, const std::string &message) {
-  return {
-      {"jsonrpc", "2.0"}, {"id", std::move(id)}, {"error", {{"code", code}, {"message", message}}}};
+Json error(Json id, int code, std::string_view message) {
+  return {{"jsonrpc", "2.0"},
+          {"id", std::move(id)},
+          {"error", {{"code", code}, {"message", std::string(message)}}}};
 }
 class Server {
   firepanda::Browser browser_;
@@ -90,7 +91,7 @@ public:
     if (!r.contains("id")) {
       return std::nullopt;
     }
-    const std::string method = r.at("method");
+    const std::string_view method = r.at("method").get_ref<const std::string &>();
     static const Json empty = Json::object();
     const auto &p = r.contains("params") ? r.at("params") : empty;
     const auto &meta = p.contains("_meta") ? p.at("_meta") : empty;
@@ -139,7 +140,7 @@ public:
           if (!p.contains("name") || !p["name"].is_string()) {
             return error(id, -32602, "Tool name must be a string");
           }
-          const auto name = p["name"].get<std::string>();
+          const auto &name = p["name"].get_ref<const std::string &>();
           try {
             auto data = firepanda::execute(browser_, name,
                                            p.contains("arguments") ? p.at("arguments") : empty);
@@ -255,17 +256,23 @@ int main(int argc, char **argv) {
       if (count <= 0) {
         break;
       }
-      for (ssize_t i = 0; i < count && !firepanda::stop_requested; ++i) {
-        const char c = buffer[i];
-        if (c != '\n') {
-          if (!oversized && line.size() < 1024 * 1024) {
-            line += c;
+      for (ssize_t offset = 0; offset < count && !firepanda::stop_requested;) {
+        const char *chunk = buffer + offset;
+        const auto *newline = static_cast<const char *>(
+            std::memchr(chunk, '\n', static_cast<size_t>(count - offset)));
+        const auto length = static_cast<size_t>((newline ? newline : buffer + count) - chunk);
+        if (!oversized) {
+          if (line.size() + length <= 1024 * 1024) {
+            line.append(chunk, length);
           } else {
             oversized = true;
             line.clear();
           }
-          continue;
         }
+        if (newline == nullptr) {
+          break;
+        }
+        offset = static_cast<ssize_t>(newline - buffer) + 1;
         std::optional<Json> response;
         // Also expire during a stream of buffered pings/notifications; MCP traffic
         // alone must not keep the browser alive. Tool execution remains synchronous.

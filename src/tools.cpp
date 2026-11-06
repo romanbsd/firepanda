@@ -10,7 +10,6 @@
 
 namespace firepanda {
 namespace {
-using Clock = std::chrono::steady_clock;
 using namespace std::chrono_literals;
 constexpr size_t max_crawl_bytes = 4 * 1024 * 1024;
 constexpr std::array<std::string_view, 5> formats{"markdown", "text", "html", "rawHtml", "links"};
@@ -24,15 +23,18 @@ struct ToolDef {
   const char *description;
 };
 constexpr std::array tool_table{
-    ToolDef{Tool::scrape, "scrape",
-            "Render a page with native Lightpanda and extract content. Markdown supports common "
-            "article elements."},
-    ToolDef{Tool::crawl, "crawl",
-            "Breadth-first crawl of same-origin pages. Returns pages and per-page errors; bounded "
-            "by depth, page count, 120 seconds, and result size."},
-    ToolDef{Tool::map, "map",
-            "Discover links with a bounded same-origin crawl. External links are listed but never "
-            "followed. Not a sitemap or search engine."},
+    ToolDef{.id = Tool::scrape,
+            .name = "scrape",
+            .description = "Render a page with native Lightpanda and extract content. Markdown "
+                           "supports common article elements."},
+    ToolDef{.id = Tool::crawl,
+            .name = "crawl",
+            .description = "Breadth-first crawl of same-origin pages. Returns pages and per-page "
+                           "errors; bounded by depth, page count, 120 seconds, and result size."},
+    ToolDef{.id = Tool::map,
+            .name = "map",
+            .description = "Discover links with a bounded same-origin crawl. External links are "
+                           "listed but never followed. Not a sitemap or search engine."},
 };
 
 enum class OptionKind { integer, string, boolean, url, formats };
@@ -49,28 +51,57 @@ struct OptionDef {
   bool discovery_only; // accepted by crawl/map; rejected by scrape
 };
 constexpr std::array options{
-    OptionDef{"url", OptionKind::url, "Absolute HTTP(S) URL without credentials", 0, 0, 0, false},
-    OptionDef{"formats", OptionKind::formats, "Output formats to extract", 0, 0, 0, false},
-    OptionDef{"onlyMainContent", OptionKind::boolean,
-              "Remove common page chrome and prefer main/article content", 1, 0, 0, false},
-    OptionDef{"timeout", OptionKind::integer,
-              "Total per-page budget in milliseconds, including navigation and extraction", 30000,
-              100, 120000, false},
-    OptionDef{"waitFor", OptionKind::integer, "Extra wait after page load, within timeout", 0, 0,
-              30000, false},
-    OptionDef{"waitForSelector", OptionKind::string,
-              "Wait for a CSS selector to match an element (presence, not visibility), within "
-              "timeout.",
-              0, 0, 2048, false},
-    OptionDef{"waitForText", OptionKind::string,
-              "Wait for literal case-sensitive body text outside scripts/styles/templates, within "
-              "timeout.",
-              0, 0, 4096, false},
-    OptionDef{"limit", OptionKind::integer, "Maximum pages to attempt", 10, 1, 100, true},
-    OptionDef{"maxDepth", OptionKind::integer, "Maximum link depth from the start URL", 1, 0, 5,
-              true},
-    OptionDef{"maxConcurrency", OptionKind::integer,
-              "Pages fetched in flight at once during this crawl", 4, 1, 16, true},
+    OptionDef{.name = "url",
+              .kind = OptionKind::url,
+              .description = "Absolute HTTP(S) URL without credentials"},
+    OptionDef{
+        .name = "formats", .kind = OptionKind::formats, .description = "Output formats to extract"},
+    OptionDef{.name = "onlyMainContent",
+              .kind = OptionKind::boolean,
+              .description = "Remove common page chrome and prefer main/article content",
+              .fallback = 1},
+    OptionDef{.name = "timeout",
+              .kind = OptionKind::integer,
+              .description = "Total per-page budget in milliseconds, including navigation and "
+                             "extraction",
+              .fallback = 30000,
+              .minimum = 100,
+              .maximum = 120000},
+    OptionDef{.name = "waitFor",
+              .kind = OptionKind::integer,
+              .description = "Extra wait after page load, within timeout",
+              .maximum = 30000},
+    OptionDef{.name = "waitForSelector",
+              .kind = OptionKind::string,
+              .description = "Wait for a CSS selector to match an element (presence, not "
+                             "visibility), within timeout.",
+              .maximum = 2048},
+    OptionDef{.name = "waitForText",
+              .kind = OptionKind::string,
+              .description = "Wait for literal case-sensitive body text outside "
+                             "scripts/styles/templates, within timeout.",
+              .maximum = 4096},
+    OptionDef{.name = "limit",
+              .kind = OptionKind::integer,
+              .description = "Maximum pages to attempt",
+              .fallback = 10,
+              .minimum = 1,
+              .maximum = 100,
+              .discovery_only = true},
+    OptionDef{.name = "maxDepth",
+              .kind = OptionKind::integer,
+              .description = "Maximum link depth from the start URL",
+              .fallback = 1,
+              .minimum = 0,
+              .maximum = 5,
+              .discovery_only = true},
+    OptionDef{.name = "maxConcurrency",
+              .kind = OptionKind::integer,
+              .description = "Pages fetched in flight at once during this crawl",
+              .fallback = 4,
+              .minimum = 1,
+              .maximum = 16,
+              .discovery_only = true},
 };
 
 const OptionDef *find_option(std::string_view name) {
@@ -192,8 +223,16 @@ std::string normalize_url(std::string_view input) {
   if (separator == std::string_view::npos) {
     throw std::invalid_argument("Use an absolute HTTP(S) URL without credentials");
   }
-  const auto scheme = lower(input.substr(0, separator));
-  if (scheme != "http" && scheme != "https") {
+  const auto scheme = input.substr(0, separator);
+  const auto equals_ascii_case = [](std::string_view value, std::string_view expected) {
+    return value.size() == expected.size() &&
+           std::equal(value.begin(), value.end(), expected.begin(), [](char actual, char wanted) {
+             return (actual >= 'A' && actual <= 'Z' ? static_cast<char>(actual + ('a' - 'A'))
+                                                    : actual) == wanted;
+           });
+  };
+  const bool secure = equals_ascii_case(scheme, "https");
+  if (!secure && !equals_ascii_case(scheme, "http")) {
     throw std::invalid_argument("Only HTTP(S) URLs are supported");
   }
   const auto host_start = separator + 3;
@@ -235,7 +274,16 @@ std::string normalize_url(std::string_view input) {
     }
     port = authority.substr(host.size() + 1);
   }
-  std::string normalized = scheme + "://" + (canonical_host.empty() ? lower(host) : canonical_host);
+  std::string normalized;
+  normalized.reserve(input.size() + 8);
+  normalized.append(secure ? "https://" : "http://");
+  if (!canonical_host.empty()) {
+    normalized += canonical_host;
+  } else if (std::any_of(host.begin(), host.end(), [](char c) { return c >= 'A' && c <= 'Z'; })) {
+    normalized += lower(host);
+  } else {
+    normalized.append(host);
+  }
   if (!port.empty() || host.size() != authority.size()) {
     unsigned number = 0;
     const auto [end, error] = std::from_chars(port.data(), port.data() + port.size(), number);
@@ -243,7 +291,7 @@ std::string normalize_url(std::string_view input) {
         port.size() > 5) {
       throw std::invalid_argument("Invalid URL port");
     }
-    if (!(scheme == "http" && number == 80) && !(scheme == "https" && number == 443)) {
+    if (!((secure && number == 443) || (!secure && number == 80))) {
       normalized += ":" + std::to_string(number);
     }
   }
@@ -334,7 +382,7 @@ const Json &tools() {
   return list;
 }
 
-Json execute(Browser &browser, const std::string &name, const Json &args) {
+Json execute(Browser &browser, std::string_view name, const Json &args) {
   const auto tool = parse_tool(name);
   auto request = parse_request(args, tool);
   if (tool == Tool::scrape) {

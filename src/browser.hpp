@@ -8,10 +8,13 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace firepanda {
 inline constexpr size_t max_links = 10000;
+// Monotonic clock shared by deadlines, idle bookkeeping, and tool loops.
+using Clock = std::chrono::steady_clock;
 // The signal handler, deadline worker, and request loops share this flag. Only
 // lock-free atomics are safe to use from a signal handler.
 static_assert(std::atomic<bool>::is_always_lock_free);
@@ -68,5 +71,5 @@ private:
   std::unique_ptr<Impl> impl_;
 };
 const Json &tools();
-Json execute(Browser &browser, const std::string &name, const Json &arguments);
+Json execute(Browser &browser, std::string_view name, const Json &arguments);
 } // namespace firepanda
