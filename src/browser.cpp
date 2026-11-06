@@ -330,10 +330,12 @@ struct Connection {
   }
 };
 
-// One page fetch on an already connected connection. Errors propagate to the
-// caller; only the crawl loop decides whether to reap the browser.
-Json run_scrape(Connection &c, const PageRequest &request, Clock::time_point deadline) {
-  c.page_loaded = false;
+// Isolated context and flattened session for one page fetch on a shared socket.
+struct PageTarget {
+  std::string context;
+  std::string session;
+};
+PageTarget open_page(Connection &c, Clock::time_point deadline) {
   const std::string context =
       c.call("Target.createBrowserContext", {{"disposeOnDetach", true}}, "", deadline)
           .at("browserContextId");
@@ -348,6 +350,11 @@ Json run_scrape(Connection &c, const PageRequest &request, Clock::time_point dea
   c.main_frame.clear();
   c.http_status.reset();
   c.early_document_statuses.clear();
+  return {context, session};
+}
+// Enables the domains extraction needs, navigates, and waits for page load.
+void navigate(Connection &c, const PageRequest &request, const std::string &session,
+              Clock::time_point deadline) {
   c.call("Page.enable", Json::object(), session, deadline);
   try {
     c.call("Network.enable", Json::object(), session, deadline);
@@ -367,18 +374,22 @@ Json run_scrape(Connection &c, const PageRequest &request, Clock::time_point dea
     throw std::runtime_error(navigation["errorText"].get<std::string>());
   }
   c.loaded(deadline);
-  const auto wait = request.wait_for;
-  if (Clock::now() + wait >= deadline) {
+}
+// Sleeps in short intervals so SIGTERM still tears down the owned child promptly.
+void wait_after_load(const PageRequest &request, Clock::time_point deadline) {
+  if (Clock::now() + request.wait_for >= deadline) {
     throw std::runtime_error("waitFor exceeds remaining operation timeout");
   }
-  // Sleep in short intervals so SIGTERM still tears down the owned child promptly.
-  const auto wait_end = Clock::now() + wait;
+  const auto wait_end = Clock::now() + request.wait_for;
   while (Clock::now() < wait_end) {
     if (stop_requested) {
       throw std::runtime_error("Service is stopping");
     }
     std::this_thread::sleep_until(std::min(wait_end, Clock::now() + 50ms));
   }
+}
+Json extract(Connection &c, const PageRequest &request, const std::string &session,
+             Clock::time_point deadline) {
   Json extraction{
       {"maxLinks", max_links},
       {"formats", request.formats},
@@ -396,7 +407,10 @@ Json run_scrape(Connection &c, const PageRequest &request, Clock::time_point dea
   if (value.contains("exceptionDetails")) {
     throw std::runtime_error("Page extraction failed: " + value["exceptionDetails"].dump());
   }
-  Json result = std::move(value.at("result").at("value"));
+  return std::move(value.at("result").at("value"));
+}
+// Rejects malformed page payloads before they enter a crawl result.
+void validate_extraction(Json &result, const PageRequest &request) {
   if (!result.is_object() || !result.contains("metadata") || !result["metadata"].is_object() ||
       !result["metadata"].contains("url") || !result["metadata"]["url"].is_string()) {
     throw std::runtime_error("Malformed page extraction metadata");
@@ -436,18 +450,31 @@ Json run_scrape(Connection &c, const PageRequest &request, Clock::time_point dea
       }
     }
   }
-  if (c.http_status) {
-    result["metadata"]["httpStatus"] = *c.http_status;
-    if (*c.http_status >= 400) {
-      if (!result.contains("warnings")) {
-        result["warnings"] = Json::array();
-      }
-      result["warnings"].push_back(
-          {{"code", "http_error"},
-           {"message", "Document returned HTTP " + std::to_string(*c.http_status)}});
-    }
+}
+void apply_http_status(Json &result, int status) {
+  result["metadata"]["httpStatus"] = status;
+  if (status < 400) {
+    return;
   }
-  c.call("Target.disposeBrowserContext", {{"browserContextId", context}}, "", deadline);
+  if (!result.contains("warnings")) {
+    result["warnings"] = Json::array();
+  }
+  result["warnings"].push_back(
+      {{"code", "http_error"}, {"message", "Document returned HTTP " + std::to_string(status)}});
+}
+
+// One page fetch on an already connected connection. Errors propagate to the
+// caller; only the crawl loop decides whether to reap the browser.
+Json run_scrape(Connection &c, const PageRequest &request, Clock::time_point deadline) {
+  const auto target = open_page(c, deadline);
+  navigate(c, request, target.session, deadline);
+  wait_after_load(request, deadline);
+  Json result = extract(c, request, target.session, deadline);
+  validate_extraction(result, request);
+  if (c.http_status) {
+    apply_http_status(result, *c.http_status);
+  }
+  c.call("Target.disposeBrowserContext", {{"browserContextId", target.context}}, "", deadline);
   return result;
 }
 // Fixed page-worker pool. Crawl/map submit every fetch here instead of creating

@@ -68,9 +68,70 @@ Json error(Json id, int code, std::string_view message) {
           {"id", std::move(id)},
           {"error", {{"code", code}, {"message", std::string(message)}}}};
 }
+const Json empty_object = Json::object();
 class Server {
   firepanda::Browser browser_;
   bool initialized_ = false;
+
+  static Json discover() {
+    return {{"supportedVersions", versions}, {"capabilities", {{"tools", Json::object()}}}};
+  }
+  Json initialize(const Json &p) {
+    if (!p.contains("protocolVersion") || !p["protocolVersion"].is_string() ||
+        !p.contains("capabilities") || !p["capabilities"].is_object() ||
+        !p.contains("clientInfo") || !p["clientInfo"].is_object()) {
+      throw std::invalid_argument(
+          "initialize requires protocolVersion, capabilities, and clientInfo");
+    }
+    auto negotiated = p.at("protocolVersion");
+    if (negotiated == protocol_version ||
+        std::find(versions.begin(), versions.end(), negotiated) == versions.end()) {
+      negotiated = fallback_protocol_version;
+    }
+    initialized_ = true;
+    return {{"protocolVersion", negotiated},
+            {"capabilities", {{"tools", Json::object()}}},
+            {"serverInfo", identity}};
+  }
+  static Json tools_list(const Json &p) {
+    if (p.contains("cursor")) {
+      throw std::invalid_argument("No pagination cursor is supported");
+    }
+    return {{"tools", firepanda::tools()}};
+  }
+  Json tools_call(const Json &p) {
+    if (!p.contains("name") || !p["name"].is_string()) {
+      throw std::invalid_argument("Tool name must be a string");
+    }
+    const auto &name = p["name"].get_ref<const std::string &>();
+    try {
+      auto data = firepanda::execute(browser_, name,
+                                     p.contains("arguments") ? p.at("arguments") : empty_object);
+      auto text = data.dump(-1, ' ', false, Json::error_handler_t::replace);
+      if (text.size() > 8 * 1024 * 1024) {
+        throw std::runtime_error("Tool result exceeds 8 MiB; select fewer output formats or pages");
+      }
+      // structuredContent repeats the whole payload. Keep it for normal
+      // results; large crawls and maps would otherwise serialize and send
+      // the data twice.
+      const bool include_structured = text.size() <= max_structured_content_bytes;
+      Json result = Json::object();
+      Json content{{"type", "text"}};
+      content["text"] = std::move(text);
+      result["content"] = Json::array();
+      result["content"].push_back(std::move(content));
+      if (include_structured) {
+        result["structuredContent"] = std::move(data);
+      }
+      result["isError"] = false;
+      return result;
+    } catch (const std::invalid_argument &) {
+      throw; // Invalid tool arguments are JSON-RPC errors, not tool results.
+    } catch (const std::exception &e) {
+      return {{"content", Json::array({{{"type", "text"}, {"text", e.what()}}})},
+              {"isError", true}};
+    }
+  }
 
 public:
   explicit Server(firepanda::Options options) : browser_(std::move(options)) {}
@@ -92,9 +153,8 @@ public:
       return std::nullopt;
     }
     const std::string_view method = r.at("method").get_ref<const std::string &>();
-    static const Json empty = Json::object();
-    const auto &p = r.contains("params") ? r.at("params") : empty;
-    const auto &meta = p.contains("_meta") ? p.at("_meta") : empty;
+    const auto &p = r.contains("params") ? r.at("params") : empty_object;
+    const auto &meta = p.contains("_meta") ? p.at("_meta") : empty_object;
     if (!meta.is_object()) {
       return error(id, -32602, "_meta must be an object");
     }
@@ -108,23 +168,9 @@ public:
     Json result;
     try {
       if (method == "server/discover") {
-        result = {{"supportedVersions", versions}, {"capabilities", {{"tools", Json::object()}}}};
+        result = discover();
       } else if (method == "initialize") {
-        if (!p.contains("protocolVersion") || !p["protocolVersion"].is_string() ||
-            !p.contains("capabilities") || !p["capabilities"].is_object() ||
-            !p.contains("clientInfo") || !p["clientInfo"].is_object()) {
-          return error(id, -32602,
-                       "initialize requires protocolVersion, capabilities, and clientInfo");
-        }
-        auto negotiated = p.at("protocolVersion");
-        if (negotiated == protocol_version ||
-            std::find(versions.begin(), versions.end(), negotiated) == versions.end()) {
-          negotiated = fallback_protocol_version;
-        }
-        initialized_ = true;
-        result = {{"protocolVersion", negotiated},
-                  {"capabilities", {{"tools", Json::object()}}},
-                  {"serverInfo", identity}};
+        result = initialize(p);
       } else {
         if (!modern && !initialized_) {
           return error(id, -32600, "Initialize first or provide modern protocol metadata");
@@ -132,46 +178,15 @@ public:
         if (method == "ping") {
           result = Json::object();
         } else if (method == "tools/list") {
-          if (p.contains("cursor")) {
-            return error(id, -32602, "No pagination cursor is supported");
-          }
-          result = {{"tools", firepanda::tools()}};
+          result = tools_list(p);
         } else if (method == "tools/call") {
-          if (!p.contains("name") || !p["name"].is_string()) {
-            return error(id, -32602, "Tool name must be a string");
-          }
-          const auto &name = p["name"].get_ref<const std::string &>();
-          try {
-            auto data = firepanda::execute(browser_, name,
-                                           p.contains("arguments") ? p.at("arguments") : empty);
-            auto text = data.dump(-1, ' ', false, Json::error_handler_t::replace);
-            if (text.size() > 8 * 1024 * 1024) {
-              throw std::runtime_error(
-                  "Tool result exceeds 8 MiB; select fewer output formats or pages");
-            }
-            // structuredContent repeats the whole payload. Keep it for normal
-            // results; large crawls and maps would otherwise serialize and send
-            // the data twice.
-            const bool include_structured = text.size() <= max_structured_content_bytes;
-            result = Json::object();
-            Json content{{"type", "text"}};
-            content["text"] = std::move(text);
-            result["content"] = Json::array();
-            result["content"].push_back(std::move(content));
-            if (include_structured) {
-              result["structuredContent"] = std::move(data);
-            }
-            result["isError"] = false;
-          } catch (const std::invalid_argument &e) {
-            return error(id, -32602, e.what());
-          } catch (const std::exception &e) {
-            result = {{"content", Json::array({{{"type", "text"}, {"text", e.what()}}})},
-                      {"isError", true}};
-          }
+          result = tools_call(p);
         } else {
           return error(id, -32601, "Method not found");
         }
       }
+    } catch (const std::invalid_argument &e) {
+      return error(id, -32602, e.what());
     } catch (const Json::exception &e) {
       return error(id, -32602, e.what());
     }

@@ -213,6 +213,61 @@ std::string lower(std::string_view value) {
   return result;
 }
 
+bool equals_ascii_case(std::string_view value, std::string_view expected) {
+  return value.size() == expected.size() &&
+         std::equal(value.begin(), value.end(), expected.begin(), [](char actual, char wanted) {
+           return (actual >= 'A' && actual <= 'Z' ? static_cast<char>(actual + ('a' - 'A'))
+                                                  : actual) == wanted;
+         });
+}
+
+// Host, optional port, and the canonical IPv6 form, if any.
+struct Authority {
+  std::string_view host;
+  std::string_view port;
+  std::string canonical_host; // "[...]" after inet_ntop; empty for names.
+  bool has_port = false;
+};
+
+Authority parse_authority(std::string_view authority) {
+  Authority parsed;
+  parsed.host = authority;
+  if (parsed.host.starts_with('[')) {
+    const auto close = parsed.host.find(']');
+    if (close == std::string_view::npos) {
+      throw std::invalid_argument("Invalid IPv6 URL host");
+    }
+    parsed.host = authority.substr(0, close + 1);
+    in6_addr address{};
+    const std::string literal(parsed.host.substr(1, parsed.host.size() - 2));
+    if (inet_pton(AF_INET6, literal.c_str(), &address) != 1) {
+      throw std::invalid_argument("Invalid IPv6 URL host");
+    }
+    char text[INET6_ADDRSTRLEN];
+    if (!inet_ntop(AF_INET6, &address, text, sizeof(text))) {
+      throw std::invalid_argument("Cannot normalize IPv6 URL host");
+    }
+    // Equivalent IPv6 spellings must not split the crawl's same-origin frontier.
+    parsed.canonical_host = "[" + std::string(text) + "]";
+  } else {
+    parsed.host = authority.substr(0, authority.find(':'));
+    if (parsed.host.empty() || !std::all_of(parsed.host.begin(), parsed.host.end(), [](char c) {
+          return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+                 c == '.' || c == '_' || c == '-';
+        })) {
+      throw std::invalid_argument("Use an absolute HTTP(S) URL without credentials");
+    }
+  }
+  if (parsed.host.size() != authority.size()) {
+    if (authority[parsed.host.size()] != ':') {
+      throw std::invalid_argument("Invalid URL authority");
+    }
+    parsed.port = authority.substr(parsed.host.size() + 1);
+    parsed.has_port = true;
+  }
+  return parsed;
+}
+
 std::string normalize_url(std::string_view input) {
   if (input.size() > 8192 || std::any_of(input.begin(), input.end(), [](unsigned char c) {
         return c <= 32 || c == 127 || c == '\\';
@@ -224,71 +279,32 @@ std::string normalize_url(std::string_view input) {
     throw std::invalid_argument("Use an absolute HTTP(S) URL without credentials");
   }
   const auto scheme = input.substr(0, separator);
-  const auto equals_ascii_case = [](std::string_view value, std::string_view expected) {
-    return value.size() == expected.size() &&
-           std::equal(value.begin(), value.end(), expected.begin(), [](char actual, char wanted) {
-             return (actual >= 'A' && actual <= 'Z' ? static_cast<char>(actual + ('a' - 'A'))
-                                                    : actual) == wanted;
-           });
-  };
   const bool secure = equals_ascii_case(scheme, "https");
   if (!secure && !equals_ascii_case(scheme, "http")) {
     throw std::invalid_argument("Only HTTP(S) URLs are supported");
   }
   const auto host_start = separator + 3;
   const auto host_end = input.find_first_of("/?#", host_start);
-  auto authority = input.substr(
+  const auto authority = input.substr(
       host_start, host_end == std::string_view::npos ? host_end : host_end - host_start);
-  auto host = authority;
-  std::string canonical_host;
-  std::string_view port;
-  if (host.starts_with('[')) {
-    const auto close = host.find(']');
-    if (close == std::string_view::npos) {
-      throw std::invalid_argument("Invalid IPv6 URL host");
-    }
-    host = authority.substr(0, close + 1);
-    in6_addr address{};
-    const std::string literal(host.substr(1, host.size() - 2));
-    if (inet_pton(AF_INET6, literal.c_str(), &address) != 1) {
-      throw std::invalid_argument("Invalid IPv6 URL host");
-    }
-    char text[INET6_ADDRSTRLEN];
-    if (!inet_ntop(AF_INET6, &address, text, sizeof(text))) {
-      throw std::invalid_argument("Cannot normalize IPv6 URL host");
-    }
-    // Equivalent IPv6 spellings must not split the crawl's same-origin frontier.
-    canonical_host = "[" + std::string(text) + "]";
-  } else {
-    host = authority.substr(0, authority.find(':'));
-    if (host.empty() || !std::all_of(host.begin(), host.end(), [](char c) {
-          return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
-                 c == '.' || c == '_' || c == '-';
-        })) {
-      throw std::invalid_argument("Use an absolute HTTP(S) URL without credentials");
-    }
-  }
-  if (host.size() != authority.size()) {
-    if (authority[host.size()] != ':') {
-      throw std::invalid_argument("Invalid URL authority");
-    }
-    port = authority.substr(host.size() + 1);
-  }
+  const auto parsed = parse_authority(authority);
   std::string normalized;
   normalized.reserve(input.size() + 8);
   normalized.append(secure ? "https://" : "http://");
-  if (!canonical_host.empty()) {
-    normalized += canonical_host;
-  } else if (std::any_of(host.begin(), host.end(), [](char c) { return c >= 'A' && c <= 'Z'; })) {
-    normalized += lower(host);
+  if (!parsed.canonical_host.empty()) {
+    normalized += parsed.canonical_host;
+  } else if (std::any_of(parsed.host.begin(), parsed.host.end(),
+                         [](char c) { return c >= 'A' && c <= 'Z'; })) {
+    normalized += lower(parsed.host);
   } else {
-    normalized.append(host);
+    normalized.append(parsed.host);
   }
-  if (!port.empty() || host.size() != authority.size()) {
+  if (parsed.has_port) {
     unsigned number = 0;
-    const auto [end, error] = std::from_chars(port.data(), port.data() + port.size(), number);
-    if (error != std::errc{} || end != port.data() + port.size() || number == 0 || number > 65535 ||
-        port.size() > 5) {
+    const auto [end, error] =
+        std::from_chars(parsed.port.data(), parsed.port.data() + parsed.port.size(), number);
+    if (error != std::errc{} || end != parsed.port.data() + parsed.port.size() || number == 0 ||
+        number > 65535 || parsed.port.size() > 5) {
       throw std::invalid_argument("Invalid URL port");
     }
     if (!((secure && number == 443) || (!secure && number == 80))) {
