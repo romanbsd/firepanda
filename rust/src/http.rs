@@ -1,6 +1,11 @@
 //! Shared browser-impersonated HTTP client for non-browser requests: the `fetch`
 //! tool and search-engine page loads. Requests run under an absolute deadline
 //! and a caller-supplied body cap.
+//!
+//! primp negotiates HTTP/2 over TLS via ALPN (Chrome's HTTP/2 window settings)
+//! and falls back to HTTP/1.1; cleartext requests use HTTP/1.1. One process-wide
+//! client keeps pooled connections (90 s idle), `TCP_NODELAY`, and compression
+//! support, so repeated fetches reuse connections instead of reconnecting.
 
 use std::sync::OnceLock;
 use std::time::Duration;

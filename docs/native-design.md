@@ -86,6 +86,13 @@ never starts the managed browser. Redirects are followed. Responses keep their
 status code and body (including 4xx/5xx), matching an HTTP client rather than a
 scraper.
 
+The client negotiates HTTP/2 over TLS through ALPN (with Chrome's HTTP/2 stream and
+connection window settings) and falls back to HTTP/1.1; cleartext requests use
+HTTP/1.1. It keeps pooled connections (90 s idle, TCP_NODELAY, compression), so
+repeated fetches and searches reuse connections. The CDP WebSocket is separate:
+it is an HTTP/1.1 Upgrade over the Unix socket (no HTTP/2 extended CONNECT) with
+16 MiB message, frame, and write-buffer caps.
+
 ## Search (feature-gated)
 
 `--features search` adds scraper (CSS parsing) and url as optional dependencies;

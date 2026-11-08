@@ -381,6 +381,11 @@ impl Drop for Browser {
     }
 }
 
+/// CDP WebSocket message and frame cap. Everything Lightpanda sends is far
+/// smaller; bounding the frame/message and write buffer keeps a misbehaving
+/// peer from growing memory.
+const MAX_WS_MESSAGE: usize = 16 * 1024 * 1024;
+
 /// One connect+handshake attempt against the CDP Unix socket, capped at the
 /// C++ connection/read timeout so a stalled peer cannot outlive the loop.
 async fn attempt(socket: &str) -> Result<CdpStream, ()> {
@@ -389,10 +394,17 @@ async fn attempt(socket: &str) -> Result<CdpStream, ()> {
             .await
             .map_err(|_| ())?;
         // Handshake over our own stream; Host stays localhost like the C++
-        // direct hostname/address map.
-        let (websocket, _) = tokio_tungstenite::client_async("ws://localhost/", stream)
-            .await
-            .map_err(|_| ())?;
+        // direct hostname/address map. Lightpanda exposes a plain WebSocket,
+        // so this is HTTP/1.1 Upgrade over the UDS (HTTP/2 extended CONNECT
+        // is not used).
+        let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+            .max_message_size(Some(MAX_WS_MESSAGE))
+            .max_frame_size(Some(MAX_WS_MESSAGE))
+            .max_write_buffer_size(MAX_WS_MESSAGE);
+        let (websocket, _) =
+            tokio_tungstenite::client_async_with_config("ws://localhost/", stream, Some(config))
+                .await
+                .map_err(|_| ())?;
         Ok(websocket)
     };
     tokio::time::timeout(CONNECT_ATTEMPT, connect)

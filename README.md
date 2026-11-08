@@ -243,7 +243,8 @@ MCP client ── stdin/stdout ── Firepanda ── CDP WebSocket / Unix sock
   browser context per page isolate cookies and page state between operations.
 - `fetch` bypasses the browser entirely: a shared browser-impersonated HTTP client
   reads JSON, Markdown, XML, text, images, and other files under the tool deadline
-  and a 4 MiB body cap. HTML is rejected and routed to `scrape`.
+  and a 4 MiB body cap. HTTP/2 is used when TLS negotiates it (HTTP/1.1 fallback),
+  and pooled connections are reused. HTML is rejected and routed to `scrape`.
 - A managed browser uses a private temporary directory (0700) and socket (0600).
   No TCP discovery endpoint, local proxy, or heartbeat thread is needed.
 - Extraction runs in the page and returns only requested formats. Link-only and

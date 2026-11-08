@@ -27,6 +27,8 @@ class QuietServer(http.server.ThreadingHTTPServer):
 
 
 class Resources(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
     def log_message(self, *args):
         pass
 
@@ -41,6 +43,7 @@ class Resources(http.server.BaseHTTPRequestHandler):
             pass
 
     def do_GET(self):
+        self.server.ports.append(self.client_address[1])
         if self.path == "/data.json":
             self.reply(200, b'{"ok": true, "items": [1, 2, 3]}', "application/json")
         elif self.path == "/doc.md":
@@ -76,6 +79,7 @@ class Resources(http.server.BaseHTTPRequestHandler):
 
 
 server = QuietServer(("127.0.0.1", 0), Resources)
+server.ports = []
 threading.Thread(target=server.serve_forever, daemon=True).start()
 base = "http://127.0.0.1:" + str(server.server_port)
 service = Service([binary, "--lightpanda", lightpanda])
@@ -108,6 +112,8 @@ try:
 
     markdown = structured(fetch("/doc.md"))
     assert markdown["text"] == "# Doc title\n\nMarkdown body.\n", markdown
+    # HTTP/1.1 keepalive: the second request reuses the pooled connection.
+    assert server.ports[0] == server.ports[1], server.ports
     assert structured(fetch("/feed.xml"))["text"] == "<feed><title>Fixture</title></feed>"
     assert structured(fetch("/icon.svg"))["encoding"] == "text"
     # Unknown/binary media types fall back to a UTF-8 sniff.
