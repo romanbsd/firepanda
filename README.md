@@ -43,6 +43,18 @@ against the core binary, and `make search-gates` runs the offline search suite
 against a separate `rust/target-search` build so the core binary is never
 overwritten.
 
+### Release build
+
+```sh
+make release          # cargo build --release --features search
+make package          # also writes dist/firepanda-VERSION-OS-ARCH.tar.gz + .sha256
+```
+
+The release binary is `rust/target/release/firepanda`. `make release` enables the
+`search` tool; use `make build` for the four-tool core binary. `make package`
+requires a tested build and produces the same archive used by the release
+workflow.
+
 The last command waits for MCP JSON-RPC messages on stdin. Stdout is reserved for
 protocol replies; diagnostics go to stderr. It does not open an HTTP port.
 Close stdin or send SIGTERM/SIGINT to shut down and clean up the managed browser.
