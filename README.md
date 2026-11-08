@@ -240,6 +240,12 @@ DuckDuckGo HTML endpoint (Brave as fallback). Engine availability depends on the
 network and can change; the offline fixture suite pins parsing and fallback
 behavior without contacting either engine.
 
+HTTP 429 is handled per engine. A `Retry-After` header is honored when it fits
+inside the remaining timeout; short retries run when the budget allows. If an
+engine keeps returning 429, it cools down: Brave uses five minutes when no header
+is sent, based on observed behavior (its 429 page sends no rate-limit headers and
+stayed 429 after 15 s and 60 s). `auto` then falls back to the next engine.
+
 ## Browser lifecycle and design
 
 ```text
@@ -369,8 +375,8 @@ cleanup, and SIGTERM teardown.
 `tests/memory.py` repeats 100 browsing cycles with large outputs and failure
 recovery, and checks descriptor hygiene.
 `tests/search.py` serves canned DuckDuckGo/Brave HTML locally and pins redirect
-decoding, ad filtering, deduplication, limits, fallback, and validation without
-network access.
+decoding, ad filtering, deduplication, limits, fallback, 429 retry/cooldown
+behavior, and validation without network access.
 `tests/fetch.py` serves JSON, Markdown, XML, images, redirects, errors, timeouts,
 and oversized bodies, and asserts that `fetch` never starts Lightpanda.
 

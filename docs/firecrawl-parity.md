@@ -108,7 +108,9 @@ Implemented arguments: `query`, `limit` (1–20), `engine`
 The response is Firecrawl v2 shaped — `{"success": true, "data": {"web":
 [{"title", "description", "url"}]}}` — with deduplicated results in engine order.
 It is keyless and local: primp impersonates a browser against DuckDuckGo's HTML
-endpoint with Brave as fallback. Not implemented: `sources`, `categories`, `tbs`,
+endpoint with Brave as fallback. HTTP 429 is handled internally: `Retry-After`
+is respected when the remaining timeout allows it, otherwise the engine cools
+down and `auto` falls back. Not implemented: `sources`, `categories`, `tbs`,
 `location`, `country`, `safe`, `scrapeOptions`, result scraping, and the
 `id`/`creditsUsed` job metadata.
 

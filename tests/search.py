@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 import urllib.parse
 
 binary, lightpanda = sys.argv[1:3]
@@ -64,8 +65,27 @@ class Engines(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
+    def rate_limited(self, retry_after=None):
+        payload = b"rate limited"
+        self.send_response(429)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(payload)))
+        if retry_after is not None:
+            self.send_header("Retry-After", retry_after)
+        self.end_headers()
+        self.wfile.write(payload)
+
     def route(self, path, body):
-        if path == "/ddg":
+        if path == "/brave-429-retry":
+            if self.server.hits.get(path, 0) == 1:
+                self.rate_limited("1")
+            else:
+                self.reply(200, BRAVE_PAGE)
+        elif path == "/brave-429":
+            self.rate_limited()
+        elif path == "/brave-429-long":
+            self.rate_limited("10")
+        elif path == "/ddg":
             self.reply(200, DDG_PAGE)
         elif path == "/brave":
             self.reply(200, BRAVE_PAGE)
@@ -79,8 +99,10 @@ class Engines(http.server.BaseHTTPRequestHandler):
             self.reply(404, "unknown engine route")
 
     def do_GET(self):
+        path = urllib.parse.urlparse(self.path).path
+        self.server.hits[path] = self.server.hits.get(path, 0) + 1
         self.server.requests.append(("GET", self.path, ""))
-        self.route(urllib.parse.urlparse(self.path).path, "")
+        self.route(path, "")
 
 
 class QuietServer(http.server.ThreadingHTTPServer):
@@ -95,6 +117,7 @@ class QuietServer(http.server.ThreadingHTTPServer):
 
 server = QuietServer(("127.0.0.1", 0), Engines)
 server.requests = []
+server.hits = {}
 threading.Thread(target=server.serve_forever, daemon=True).start()
 base = "http://127.0.0.1:" + str(server.server_port)
 
@@ -184,6 +207,53 @@ try:
 finally:
     stop(service)
 
+# Brave 429 with Retry-After: wait if the budget allows, then succeed.
+server.hits.clear()
+service = service_for(brave="/brave-429-retry")
+try:
+    started = time.monotonic()
+    web = results(service.tool("search", query="retry", engine="brave", timeout=5000))
+    elapsed = time.monotonic() - started
+    assert [item["url"] for item in web] == [
+        "https://brave.example/one", "https://brave.example/two"], web
+    assert server.hits["/brave-429-retry"] == 2, server.hits
+    assert elapsed >= 0.9, elapsed
+finally:
+    stop(service)
+
+# Brave 429 without headers: short retries, then a cooldown that blocks the
+# next call without another network request.
+server.hits.clear()
+service = service_for(brave="/brave-429")
+try:
+    started = time.monotonic()
+    failed = service.call("tools/call", name="search",
+                          arguments={"query": "limited", "engine": "brave", "timeout": 5000})
+    elapsed = time.monotonic() - started
+    assert failed.get("isError"), failed
+    assert "Brave rate limited (HTTP 429)" in failed["content"][0]["text"], failed
+    assert server.hits["/brave-429"] == 3, server.hits
+    assert elapsed >= 2.9, elapsed
+    blocked = service.call("tools/call", name="search",
+                           arguments={"query": "again", "engine": "brave", "timeout": 1000})
+    assert blocked.get("isError") and "rate limited" in blocked["content"][0]["text"], blocked
+    assert server.hits["/brave-429"] == 3, server.hits
+finally:
+    stop(service)
+
+# Retry-After longer than the remaining budget fails immediately.
+server.hits.clear()
+service = service_for(brave="/brave-429-long")
+try:
+    started = time.monotonic()
+    failed = service.call("tools/call", name="search",
+                          arguments={"query": "limited", "engine": "brave", "timeout": 1000})
+    assert failed.get("isError") and "retry in 10s" in failed["content"][0]["text"], failed
+    assert server.hits["/brave-429-long"] == 1, server.hits
+    assert time.monotonic() - started < 2, "must not sleep past the budget"
+finally:
+    stop(service)
+
 # Auto falls back to Brave when DuckDuckGo fails.
 service = service_for(ddg="/broken")
 try:
@@ -233,5 +303,5 @@ try:
 finally:
     stop(service)
 
-print("PASS: search — DuckDuckGo/Brave parsing, dedupe, limits, fallback, validation")
+print("PASS: search — parsing, dedupe, limits, fallback, 429 retry/cooldown")
 server.shutdown()

@@ -120,6 +120,14 @@ and results are deduplicated by normalized URL. `auto` tries DuckDuckGo, then
 Brave; network/HTTP failures and empty result sets fall through, all under one
 total timeout.
 
+A 429 is retried only while the remaining budget covers the wait. `Retry-After`
+(delta seconds or HTTP-date) and `X-RateLimit-Reset` are honored and clamped to
+one hour. Brave's HTML endpoint was observed sending no rate-limit headers and
+returning 429 after 15 s and 60 s, so headerless 429s get one- and two-second
+in-call retries, then a five-minute engine cooldown; a subsequent call inside
+that window fails fast with a retry hint. A successful response clears the
+cooldown.
+
 The response is Firecrawl v2 shaped (`{"success": true, "data": {"web": [...]}}`).
 Engine bodies are capped at 8 MiB and each attempt runs under the remaining tool
 budget. `FIREPANDA_SEARCH_DDG_URL` and `FIREPANDA_SEARCH_BRAVE_URL` override the

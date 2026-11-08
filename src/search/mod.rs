@@ -19,6 +19,8 @@ use scraper::{ElementRef, Html, Selector};
 use serde_json::{Value, json};
 use std::time::Duration;
 
+mod rate_limit;
+
 const DEFAULT_LIMIT: i64 = 5;
 const MAX_LIMIT: i64 = 20;
 const QUERY_MAX_BYTES: usize = 512;
@@ -227,30 +229,54 @@ async fn search_engine(
 ) -> Result<Vec<Item>, String> {
     let client = http::client()?;
     let deadline = tokio::time::Instant::now() + timeout;
-    let request = match engine {
-        // GET keeps the HTML endpoint from serving a cookie challenge.
-        Engine::DuckDuckGo => client
-            .get(base)
-            .query(&[("q", query), ("b", ""), ("l", "us-en")]),
-        Engine::Brave => client.get(base).query(&[("q", query), ("source", "web")]),
-    };
-    let response = tokio::time::timeout_at(deadline, request.send())
-        .await
-        .map_err(|_| "Search request timed out".to_string())?
-        .map_err(|error| format!("Search request failed: {}", error.without_url()))?;
-    let status = response.status();
-    if !status.is_success() {
-        return Err(format!("Search engine returned HTTP {status}"));
-    }
-    let body = http::text_or_lossy(
-        http::read_limited(response, MAX_BODY_BYTES, deadline)
+    let mut attempt = 0;
+    loop {
+        // A recent 429 may still be cooling down; fail fast when the budget
+        // cannot cover the declared/default wait.
+        rate_limit::wait_for_slot(engine, deadline).await?;
+        let request = match engine {
+            // GET keeps the HTML endpoint from serving a cookie challenge.
+            Engine::DuckDuckGo => {
+                client
+                    .get(base)
+                    .query(&[("q", query), ("b", ""), ("l", "us-en")])
+            }
+            Engine::Brave => client.get(base).query(&[("q", query), ("source", "web")]),
+        };
+        let response = tokio::time::timeout_at(deadline, request.send())
             .await
-            .map_err(|error| error.replace("HTTP response", "Search response"))?,
-    );
-    Ok(match engine {
-        Engine::DuckDuckGo => parse_ddg(&body, base),
-        Engine::Brave => parse_brave(&body, base),
-    })
+            .map_err(|_| "Search request timed out".to_string())?
+            .map_err(|error| format!("Search request failed: {}", error.without_url()))?;
+        let status = response.status();
+        if status.as_u16() == 429 {
+            let declared = rate_limit::retry_after(&response);
+            let delay = declared.unwrap_or_else(|| rate_limit::backoff(attempt));
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if attempt < rate_limit::MAX_RETRIES && delay < remaining {
+                tokio::time::sleep(delay).await;
+                attempt += 1;
+                continue;
+            }
+            let cooldown = declared
+                .unwrap_or(rate_limit::DEFAULT_429_COOLDOWN)
+                .max(Duration::from_secs(1));
+            rate_limit::set_cooldown(engine, tokio::time::Instant::now() + cooldown);
+            return Err(rate_limit::rate_limited_error(engine, cooldown));
+        }
+        if !status.is_success() {
+            return Err(format!("Search engine returned HTTP {status}"));
+        }
+        let body = http::text_or_lossy(
+            http::read_limited(response, MAX_BODY_BYTES, deadline)
+                .await
+                .map_err(|error| error.replace("HTTP response", "Search response"))?,
+        );
+        rate_limit::clear_cooldown(engine);
+        return Ok(match engine {
+            Engine::DuckDuckGo => parse_ddg(&body, base),
+            Engine::Brave => parse_brave(&body, base),
+        });
+    }
 }
 
 struct Item {

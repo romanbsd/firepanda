@@ -9,6 +9,7 @@ edition = "2024"
 [dependencies]
 base64 = "0.23"
 futures-util = { version = "0.3", features = ["sink"] }
+httpdate = "1"
 libc = "0.2.191"
 primp = "2.0.1"
 scraper = "0.29.0"
