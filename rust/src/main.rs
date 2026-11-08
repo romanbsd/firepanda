@@ -5,6 +5,8 @@ mod browser;
 mod cli;
 mod json;
 mod mcp;
+#[cfg(feature = "search")]
+mod search;
 mod tools;
 
 use serde_json::Value;

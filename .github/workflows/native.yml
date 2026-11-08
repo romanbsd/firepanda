@@ -66,6 +66,38 @@ jobs:
         run: python3 tests/integration.py rust/target/release/firepanda "$PWD/.local/bin/lightpanda"
       - name: Memory and descriptor hygiene gate
         run: python3 tests/memory.py rust/target/release/firepanda "$PWD/.local/bin/lightpanda"
+  rust-search:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --manifest-path rust/Cargo.toml --check
+      - name: Clippy with the search feature
+        run: >-
+          cargo clippy --manifest-path rust/Cargo.toml --release --all-targets
+          --features search --target-dir rust/target-search -- -D warnings
+      - name: Unit tests with the search feature
+        run: >-
+          cargo test --manifest-path rust/Cargo.toml --release --features search
+          --target-dir rust/target-search
+      - name: Build the search binary
+        run: >-
+          cargo build --manifest-path rust/Cargo.toml --release --features search
+          --target-dir rust/target-search
+      - name: Offline search gate
+        run: >-
+          python3 tests/search.py rust/target-search/release/firepanda
+          "$PWD/.local/bin/lightpanda"
   sanitizers:
     runs-on: ubuntu-latest
     timeout-minutes: 15

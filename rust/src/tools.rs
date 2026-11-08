@@ -20,6 +20,9 @@ pub enum Tool {
     Scrape,
     Crawl,
     Map,
+    /// Keyless web search; only present in `--features search` builds.
+    #[cfg(feature = "search")]
+    Search,
 }
 
 struct ToolDef {
@@ -29,7 +32,7 @@ struct ToolDef {
 }
 
 /// One row per tool: dispatch and tools/list both read this table.
-const TOOL_TABLE: [ToolDef; 3] = [
+static TOOL_TABLE: &[ToolDef] = &[
     ToolDef {
         id: Tool::Scrape,
         name: "scrape",
@@ -47,6 +50,13 @@ const TOOL_TABLE: [ToolDef; 3] = [
         name: "map",
         description: "Discover links with a bounded same-origin crawl. External links are \
                       listed but never followed. Not a sitemap or search engine.",
+    },
+    #[cfg(feature = "search")]
+    ToolDef {
+        id: Tool::Search,
+        name: "search",
+        description: "Search the web without an API key using browser-impersonated requests \
+                      to DuckDuckGo and Brave. Returns titles, URLs, and snippets.",
     },
 ];
 
@@ -448,6 +458,10 @@ pub fn tools_list() -> Value {
         let tools: Vec<Value> = TOOL_TABLE
             .iter()
             .map(|entry| {
+                #[cfg(feature = "search")]
+                if entry.id == Tool::Search {
+                    return crate::search::tool_definition();
+                }
                 let mut properties = serde_json::Map::new();
                 for option in &OPTIONS {
                     if option.discovery_only && entry.id == Tool::Scrape {
@@ -486,6 +500,14 @@ pub enum CallError {
 
 pub async fn execute(browser: &Browser, name: &str, args: &Value) -> Result<Value, CallError> {
     let tool = parse_tool(name).map_err(CallError::Invalid)?;
+    // Search takes its own arguments (no URL), so it bypasses parse_request.
+    #[cfg(feature = "search")]
+    if tool == Tool::Search {
+        let query = crate::search::Query::parse(args).map_err(CallError::Invalid)?;
+        return crate::search::execute(&query)
+            .await
+            .map_err(CallError::Tool);
+    }
     let request = parse_request(args, tool).map_err(CallError::Invalid)?;
     if tool == Tool::Scrape {
         return browser.scrape(&request).await.map_err(CallError::Tool);
@@ -591,10 +613,27 @@ mod tests {
     fn schema_shape() {
         let list = tools_list();
         let tools = list.as_array().unwrap();
-        assert_eq!(tools.len(), 3);
+        assert_eq!(tools.len(), if cfg!(feature = "search") { 4 } else { 3 });
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert_eq!(names, ["scrape", "crawl", "map"]);
+        assert_eq!(
+            names,
+            if cfg!(feature = "search") {
+                &["scrape", "crawl", "map", "search"][..]
+            } else {
+                &["scrape", "crawl", "map"][..]
+            }
+        );
         for tool in tools {
+            if tool["name"] == "search" {
+                let properties = &tool["inputSchema"]["properties"];
+                assert_eq!(tool["inputSchema"]["required"], json!(["query"]));
+                assert_eq!(properties["limit"]["maximum"], 20);
+                assert_eq!(
+                    properties["engine"]["enum"],
+                    json!(["auto", "duckduckgo", "brave"])
+                );
+                continue;
+            }
             let properties = &tool["inputSchema"]["properties"];
             for name in ["waitForSelector", "waitForText"] {
                 assert_eq!(properties[name]["type"], "string");
