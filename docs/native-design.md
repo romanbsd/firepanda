@@ -75,6 +75,23 @@ results are duplicated on the wire below that threshold for client compatibility
 The link cap is defined once in `tools.rs` and passed into the extractor. Option
 definitions feed both validation and JSON schemas, including per-tool applicability.
 
+## Memory
+
+- Tool payloads are moved into replies, not re-serialized. `json::object` builds
+  response objects from owned values; `json!` would call `to_value(&value)` and
+  copy large strings. This covers the serialized tool text, the JSON-RPC envelope,
+  fetch bodies, and crawl link/error/warning records.
+- Crawl frontier URLs use one `Arc<str>` shared by the queue, the queued/visited
+  sets, and map discovery. Map output owns one `String` per returned link.
+- `fetch` frees the raw body after base64 encoding; UTF-8 text moves into the
+  response string without a copy.
+- Crawl's 4 MiB page budget is measured with a counting writer, so a page is never
+  serialized into a page-sized temporary string just to size it.
+- Remaining ceiling: a reply above 1 MiB still holds the tool payload while the
+  text field is serialized, then the serialized text while the envelope is built.
+  Streaming the text field directly to stdout would remove one copy; results up to
+  1 MiB intentionally duplicate `structuredContent` for MCP compatibility.
+
 ## Fetch shortcut
 
 `fetch` bypasses Lightpanda for resources that do not need rendering. A shared

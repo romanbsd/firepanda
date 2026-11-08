@@ -192,7 +192,14 @@ pub async fn execute(query: &Query) -> Result<Value, String> {
         };
         match search_engine(*engine, &base, &query.text, remaining).await {
             Ok(items) if !items.is_empty() => {
-                return Ok(json!({"success": true, "data": {"web": dedupe(items, query.limit)}}));
+                let results = dedupe(items, query.limit);
+                return Ok(crate::json::object([
+                    ("success", Value::Bool(true)),
+                    (
+                        "data",
+                        crate::json::object([("web", Value::Array(results))]),
+                    ),
+                ]));
             }
             Ok(_) => last_error = "No search results".to_string(),
             Err(message) => last_error = message,
@@ -261,11 +268,11 @@ fn dedupe(items: Vec<Item>, limit: usize) -> Vec<Value> {
             break;
         }
         if seen.insert(item.url.clone()) {
-            results.push(json!({
-                "title": item.title,
-                "description": item.description,
-                "url": item.url,
-            }));
+            results.push(crate::json::object([
+                ("title", Value::String(item.title)),
+                ("description", Value::String(item.description)),
+                ("url", Value::String(item.url)),
+            ]));
         }
     }
     results

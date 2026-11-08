@@ -8,8 +8,9 @@
 use super::{MAX_CRAWL_BYTES, MAX_LINKS, Tool, normalize_url, origin};
 use crate::browser::{Browser, Format, PageRequest, PageTask};
 use crate::json::serialized_size_within;
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::collections::{HashSet, VecDeque};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Fixed crawl/map budget (C++ `Clock::now() + 120s`).
@@ -20,7 +21,7 @@ const DISPATCH_FLOOR: Duration = Duration::from_millis(100);
 /// One dispatched page awaiting consumption, in dispatch order.
 struct Inflight {
     depth: i64,
-    url: String,
+    url: Arc<str>,
     task: PageTask,
 }
 
@@ -40,10 +41,10 @@ struct Crawl {
     start_origin: String,
     max_depth: i64,
     return_links: bool,
-    queue: VecDeque<(String, i64)>,
-    queued: HashSet<String>,
-    discovered: HashSet<String>,
-    visited: HashSet<String>,
+    queue: VecDeque<(Arc<str>, i64)>,
+    queued: HashSet<Arc<str>>,
+    discovered: HashSet<Arc<str>>,
+    visited: HashSet<Arc<str>>,
     pages: Vec<Value>,
     links: Vec<Value>,
     errors: Vec<Value>,
@@ -88,7 +89,8 @@ impl Crawl {
             .and_then(|metadata| metadata.get("url"))
             .and_then(Value::as_str)
             .ok_or_else(|| "Page metadata must include a URL".to_string())?;
-        let canonical = normalize_url(listed)?;
+        // One shared URL allocation for the visited/queued/frontier sets.
+        let canonical: Arc<str> = Arc::from(normalize_url(listed)?);
         // A redirect may reach a URL already queued through a direct link.
         // Track final destinations so it is neither rendered nor returned twice.
         if !self.visited.insert(canonical.clone()) {
@@ -102,8 +104,10 @@ impl Crawl {
                 .and_then(|object| object.remove("warnings"))
         {
             // Map does not return the page itself, so move its warnings.
-            self.warnings
-                .push(json!({"url": canonical, "warnings": warnings}));
+            self.warnings.push(crate::json::object([
+                ("url", Value::String(canonical.to_string())),
+                ("warnings", warnings),
+            ]));
         }
         if page.get("linksTruncated").and_then(Value::as_bool) == Some(true) {
             self.truncated = true;
@@ -116,9 +120,10 @@ impl Crawl {
                 let Ok(candidate) = normalize_url(candidate) else {
                     continue; // Invalid link URLs never join the frontier.
                 };
+                let candidate: Arc<str> = Arc::from(candidate);
                 // Crawl only needs its frontier; retaining a second map of
                 // every link would waste memory.
-                if self.tool == Tool::Map && !self.discovered.contains(&candidate) {
+                if self.tool == Tool::Map && !self.discovered.contains(candidate.as_ref()) {
                     if self.discovered.len() == MAX_LINKS {
                         self.truncated = true;
                     } else {
@@ -128,14 +133,17 @@ impl Crawl {
                             .and_then(Value::as_str)
                             .unwrap_or("")
                             .to_string();
-                        self.links.push(json!({"url": candidate, "title": title}));
+                        self.links.push(crate::json::object([
+                            ("url", Value::String(candidate.to_string())),
+                            ("title", Value::String(title)),
+                        ]));
                     }
                 }
                 if expand
                     && depth < self.max_depth
-                    && origin(&candidate) == self.start_origin
-                    && !self.queued.contains(&candidate)
-                    && !self.visited.contains(&candidate)
+                    && origin(candidate.as_ref()) == self.start_origin
+                    && !self.queued.contains(candidate.as_ref())
+                    && !self.visited.contains(candidate.as_ref())
                 {
                     if self.queued.len() == MAX_LINKS {
                         self.truncated = true;
@@ -172,12 +180,19 @@ impl Crawl {
                 if let Err(message) = self.record(depth, page) {
                     // Recording failures come from a healthy page; the browser
                     // stays up.
-                    self.errors.push(json!({"url": url, "error": message}));
+                    self.errors.push(error_record(url, message));
                 }
             }
-            Err(message) => self.errors.push(json!({"url": url, "error": message})),
+            Err(message) => self.errors.push(error_record(url, message)),
         }
     }
+}
+
+fn error_record(url: &str, message: String) -> Value {
+    crate::json::object([
+        ("url", Value::String(url.to_string())),
+        ("error", Value::String(message)),
+    ])
 }
 
 /// Await one in-flight page and normalize worker failures.
@@ -210,8 +225,9 @@ pub async fn run(
     };
     let return_links = page_formats.contains(&Format::Links);
     let mut crawl = Crawl::new(tool, &start_origin, max_depth, return_links);
-    crawl.queued.insert(start_origin.clone());
-    crawl.queue.push_back((start_origin, 0));
+    let start: Arc<str> = Arc::from(start_origin.as_str());
+    crawl.queued.insert(start.clone());
+    crawl.queue.push_back((start, 0));
     let mut inflight: VecDeque<Inflight> = VecDeque::new();
 
     while !browser.stopped()
@@ -224,7 +240,7 @@ pub async fn run(
             && inflight.len() < concurrency
             && let Some((url, depth)) = crawl.queue.pop_front()
         {
-            if crawl.visited.contains(&url) {
+            if crawl.visited.contains(url.as_ref()) {
                 continue;
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -241,7 +257,7 @@ pub async fn run(
             // Build the per-page request directly: cloning the template and
             // then overwriting url/formats/timeout would copy them twice.
             let page_request = PageRequest {
-                url: url.clone(),
+                url: url.to_string(),
                 formats,
                 only_main_content: request.only_main_content,
                 timeout: std::cmp::min(page_timeout, remaining),
@@ -282,11 +298,14 @@ pub async fn run(
         }
     }
 
-    let mut result = json!({
-        "attempted": crawl.attempted,
-        "truncated": crawl.truncated || !crawl.queue.is_empty(),
-        "errors": crawl.errors,
-    });
+    let mut result = crate::json::object([
+        ("attempted", Value::from(crawl.attempted)),
+        (
+            "truncated",
+            Value::Bool(crawl.truncated || !crawl.queue.is_empty()),
+        ),
+    ]);
+    result["errors"] = Value::Array(crawl.errors);
     if !crawl.warnings.is_empty() {
         result["warnings"] = Value::Array(crawl.warnings);
     }

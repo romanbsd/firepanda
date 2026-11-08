@@ -102,17 +102,27 @@ impl Server {
             Ok(data) => {
                 let text = serde_json::to_string(&data)
                     .map_err(|error| format!("Cannot serialize tool result: {error}"))?;
-                if text.len() > MAX_TOOL_RESULT_BYTES {
+                let text_len = text.len();
+                if text_len > MAX_TOOL_RESULT_BYTES {
                     return Ok(json!({
                         "content": [{"type": "text", "text": "Tool result exceeds 8 MiB; select fewer output formats or pages"}],
                         "isError": true,
                     }));
                 }
-                // structuredContent repeats the whole payload. Keep it for normal
-                // results; large crawls and maps would otherwise serialize twice.
-                let mut result =
-                    json!({"content": [{"type": "text", "text": text}], "isError": false});
-                if text.len() <= MAX_STRUCTURED_CONTENT_BYTES {
+                // Move the serialized text into the reply: `json!` would copy a
+                // multi-megabyte string. structuredContent repeats the payload
+                // only for normal-size results.
+                let mut result = crate::json::object([
+                    (
+                        "content",
+                        Value::Array(vec![crate::json::object([
+                            ("type", Value::String("text".to_string())),
+                            ("text", Value::String(text)),
+                        ])]),
+                    ),
+                    ("isError", Value::Bool(false)),
+                ]);
+                if text_len <= MAX_STRUCTURED_CONTENT_BYTES {
                     result["structuredContent"] = data;
                 }
                 Ok(result)
@@ -183,9 +193,14 @@ impl Server {
         };
         if modern || method == "server/discover" {
             result["resultType"] = json!("complete");
-            result["_meta"] = json!({"io.modelcontextprotocol/serverInfo": identity()});
+            result["_meta"] =
+                crate::json::object([("io.modelcontextprotocol/serverInfo", identity())]);
         }
-        Some(json!({"jsonrpc": "2.0", "id": id, "result": result}))
+        Some(crate::json::object([
+            ("jsonrpc", Value::String("2.0".to_string())),
+            ("id", id),
+            ("result", result),
+        ]))
     }
 }
 

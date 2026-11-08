@@ -78,6 +78,17 @@ pub fn serialized_size_within(value: &Value, limit: usize) -> Option<usize> {
     Some(writer.written)
 }
 
+/// Build a JSON object from already-built values. `json!` serializes borrowed
+/// expressions, so `json!({"text": big_string})` copies the string; this moves
+/// it instead. Use it on hot paths that carry page-sized payloads.
+pub fn object<const N: usize>(entries: [(&str, Value); N]) -> Value {
+    let mut map = serde_json::Map::with_capacity(N);
+    for (key, value) in entries {
+        map.insert(key.to_string(), value);
+    }
+    Value::Object(map)
+}
+
 struct CountingWriter {
     written: usize,
     limit: usize,

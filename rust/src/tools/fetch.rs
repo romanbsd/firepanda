@@ -5,7 +5,7 @@
 use super::{Tool, find_option, normalize_url, parse_millis};
 use crate::http;
 use base64::Engine;
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::time::Duration;
 
 /// Raw body cap. Base64 inflates by 4/3, so this keeps the tool result under
@@ -64,13 +64,13 @@ pub async fn run(request: &Request) -> Result<Value, String> {
     }
     let bytes = http::read_limited(response, MAX_FETCH_BYTES, deadline).await?;
     let size = bytes.len();
-    let mut payload = json!({
-        "url": final_url,
-        "sourceURL": request.url,
-        "statusCode": status,
-        "contentType": content_type,
-        "size": size,
-    });
+    let mut payload = crate::json::object([
+        ("url", Value::String(final_url)),
+        ("sourceURL", Value::String(request.url.clone())),
+        ("statusCode", Value::from(status)),
+        ("contentType", Value::String(content_type)),
+        ("size", Value::from(size)),
+    ]);
     let textual = if is_text(&mime) {
         true
     } else if mime.is_empty() || mime == "application/octet-stream" {
@@ -79,11 +79,13 @@ pub async fn run(request: &Request) -> Result<Value, String> {
         false
     };
     if textual {
-        payload["encoding"] = json!("text");
-        payload["text"] = json!(http::text_or_lossy(bytes));
+        payload["encoding"] = Value::String("text".to_string());
+        payload["text"] = Value::String(http::text_or_lossy(bytes));
     } else {
-        payload["encoding"] = json!("base64");
-        payload["base64"] = json!(base64::engine::general_purpose::STANDARD.encode(&bytes));
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        drop(bytes); // Free the raw body before the reply is serialized.
+        payload["encoding"] = Value::String("base64".to_string());
+        payload["base64"] = Value::String(encoded);
     }
     Ok(payload)
 }
@@ -131,6 +133,7 @@ fn sniff_text(bytes: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn content_types_classify_consistently() {
