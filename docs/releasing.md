@@ -9,7 +9,7 @@ with a native Lightpanda build:
 make check
 make test
 python3 scripts/install-lightpanda.py --release 1.0.2
-make gates           # parity binary: protocol, transport, integration, memory
+make gates           # core binary: protocol, transport, fetch, integration, memory
 make search-gates    # search-feature binary: offline engine fixtures
 ```
 
@@ -21,14 +21,14 @@ say which browser-dependent checks could not run.
 ## Dependency updates
 
 Dependabot (`.github/dependabot.yml`) opens weekly pull requests against the
-`rust/` Cargo workspace and the GitHub Actions workflows. Minor/patch updates are
+root Cargo project and the GitHub Actions workflows. Minor/patch updates are
 grouped; major updates arrive separately for review. To update locally:
 
 ```sh
-cargo update --manifest-path rust/Cargo.toml
-cargo upgrade --manifest-path rust/Cargo.toml --incompatible
-cargo test --manifest-path rust/Cargo.toml --release
-cargo test --manifest-path rust/Cargo.toml --release --features search
+cargo update
+cargo upgrade --incompatible
+cargo test --release
+cargo test --release --features search
 ```
 
 Review the lockfile diff and upstream license/API changes before merging. New
@@ -37,11 +37,11 @@ the `search` feature.
 
 ## Prepare a release
 
-1. Bump `version` in `rust/Cargo.toml` (and refresh `Cargo.lock`).
+1. Bump `version` in `Cargo.toml` (and refresh `Cargo.lock`).
 2. Run `make check`, `make test`, `make gates`, and `make search-gates`.
 3. Confirm the release build reports the new version:
-   `cargo build --manifest-path rust/Cargo.toml --release --features search &&
-   rust/target/release/firepanda --version`.
+   `cargo build --release --features search &&
+   target/release/firepanda --version`.
 4. Tag `vVERSION` and push. The Release workflow builds and tests the tagged
    tree on macOS and Ubuntu, packages archives, and creates a draft release.
 
@@ -50,7 +50,7 @@ the `search` feature.
 From a tested source build:
 
 ```sh
-python3 scripts/package-release.py --binary rust/target/release/firepanda --tag v0.2.0
+python3 scripts/package-release.py --binary target/release/firepanda --tag v0.2.0
 ```
 
 The script writes `dist/firepanda-VERSION-OS-ARCH.tar.gz` and an accompanying

@@ -10,7 +10,7 @@ scraping results. No UDS-versus-TCP comparison was performed.
 From a release source build with Python 3.11+ and a native Lightpanda binary:
 
 ```sh
-python3 scripts/benchmark.py --binary rust/target/release/firepanda \
+python3 scripts/benchmark.py --binary target/release/firepanda \
   --lightpanda .local/bin/lightpanda --iterations 20 --output dist/benchmark.json
 ```
 
@@ -59,7 +59,7 @@ times, not public-site latency or throughput guarantees.
 
 ## Bounded JSON size accounting
 
-The JSON budget helper is `serialized_size_within` in `rust/src/json.rs`, ported
+The JSON budget helper is `serialized_size_within` in `src/json.rs`, ported
 from the former C++ test suite. It walks the value with a counting writer that
 fails as soon as the limit is exceeded, so measuring a page allocates no
 page-sized string. It is covered by `cargo test` across

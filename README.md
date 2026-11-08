@@ -32,15 +32,15 @@ From a checkout of this repository:
 
 ```sh
 python3 scripts/install-lightpanda.py --release 1.0.2
-cargo build --manifest-path rust/Cargo.toml --release --features search
-./rust/target/release/firepanda --lightpanda "$PWD/.local/bin/lightpanda"
+cargo build --release --features search
+./target/release/firepanda --lightpanda "$PWD/.local/bin/lightpanda"
 ```
 
 Omit `--features search` for the core build, which advertises the four tools
 `scrape`, `fetch`, `crawl`, and `map`. `make release` is the same command;
 `make build` is the core build. `make gates` runs the browser-dependent suites
 against the core binary, and `make search-gates` runs the offline search suite
-against a separate `rust/target-search` build so the core binary is never
+against a separate `target-search` build so the core binary is never
 overwritten.
 
 ### Release build
@@ -50,7 +50,7 @@ make release          # cargo build --release --features search
 make package          # also writes dist/firepanda-VERSION-OS-ARCH.tar.gz + .sha256
 ```
 
-The release binary is `rust/target/release/firepanda`. `make release` enables the
+The release binary is `target/release/firepanda`. `make release` enables the
 `search` tool; use `make build` for the four-tool core binary. `make package`
 requires a tested build and produces the same archive used by the release
 workflow.
@@ -94,7 +94,7 @@ Replace the two example paths with absolute paths on your machine:
 {
   "mcpServers": {
     "firepanda": {
-      "command": "/absolute/path/to/firepanda/rust/target/release/firepanda",
+      "command": "/absolute/path/to/firepanda/target/release/firepanda",
       "args": ["--lightpanda", "/absolute/path/to/firepanda/.local/bin/lightpanda"]
     }
   }
@@ -109,7 +109,7 @@ Lightpanda; the first browser request does.
 For a direct protocol smoke test:
 
 ```sh
-./rust/target/release/firepanda --lightpanda "$PWD/.local/bin/lightpanda" <<'JSONRPC'
+./target/release/firepanda --lightpanda "$PWD/.local/bin/lightpanda" <<'JSONRPC'
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}}
 {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"scrape","arguments":{"url":"https://example.com","formats":["markdown","links"]}}}
 JSONRPC
@@ -283,7 +283,7 @@ Attach to a browser you manage yourself:
 mkdir -m 700 /tmp/my-lightpanda
 lightpanda serve --unix-socket /tmp/my-lightpanda/cdp.sock
 # In another terminal:
-./rust/target/release/firepanda --socket /tmp/my-lightpanda/cdp.sock
+./target/release/firepanda --socket /tmp/my-lightpanda/cdp.sock
 ```
 
 The socket path must be absolute and at most 100 bytes. Firepanda closes its own
@@ -340,7 +340,7 @@ exists in this repository.
 Reproduce current service wall-time measurements from a source checkout:
 
 ```sh
-python3 scripts/benchmark.py --binary rust/target/release/firepanda \
+python3 scripts/benchmark.py --binary target/release/firepanda \
   --lightpanda .local/bin/lightpanda --iterations 20 --output dist/benchmark.json
 ```
 

@@ -21,18 +21,18 @@ signals the child PID it created; an external browser is never terminated.
 
 | Path | Responsibility |
 | --- | --- |
-| `rust/src/main.rs` | stdio loop: chunked reads, line assembly, idle select arm, EOF/SIGTERM exit |
-| `rust/src/cli.rs` | argv parsing and exit codes |
-| `rust/src/json.rs` | 64-level nesting check, bounded line parse, `serialized_size_within` |
-| `rust/src/mcp.rs` | JSON-RPC framing, modern/legacy negotiation, result wrapping and size caps |
-| `rust/src/tools.rs` | tool table, argument schema/validation, URL normalization, dispatch |
-| `rust/src/tools/crawl.rs` | bounded BFS crawl/map, ordering, failure drain |
-| `rust/src/browser/mod.rs` | process lifecycle, connection pool, idle bookkeeping, shutdown |
-| `rust/src/browser/cdp.rs` | deadline-bounded CDP connection, scrape pipeline, validation |
-| `rust/src/browser/extract.js` | in-page extractor (embedded with `include_str!`) |
-| `rust/src/http.rs` | shared browser-impersonated HTTP client, deadline-bounded body reader |
-| `rust/src/tools/fetch.rs` | raw JSON/Markdown/XML/image fetch without the browser |
-| `rust/src/search/mod.rs` | feature-gated keyless search (primp + scraper) |
+| `src/main.rs` | stdio loop: chunked reads, line assembly, idle select arm, EOF/SIGTERM exit |
+| `src/cli.rs` | argv parsing and exit codes |
+| `src/json.rs` | 64-level nesting check, bounded line parse, `serialized_size_within` |
+| `src/mcp.rs` | JSON-RPC framing, modern/legacy negotiation, result wrapping and size caps |
+| `src/tools.rs` | tool table, argument schema/validation, URL normalization, dispatch |
+| `src/tools/crawl.rs` | bounded BFS crawl/map, ordering, failure drain |
+| `src/browser/mod.rs` | process lifecycle, connection pool, idle bookkeeping, shutdown |
+| `src/browser/cdp.rs` | deadline-bounded CDP connection, scrape pipeline, validation |
+| `src/browser/extract.js` | in-page extractor (embedded with `include_str!`) |
+| `src/http.rs` | shared browser-impersonated HTTP client, deadline-bounded body reader |
+| `src/tools/fetch.rs` | raw JSON/Markdown/XML/image fetch without the browser |
+| `src/search/mod.rs` | feature-gated keyless search (primp + scraper) |
 
 ## Concurrency and lifecycle
 
@@ -157,8 +157,8 @@ packaging is verified by running `scripts/package-release.py` on the built binar
 
 ## Packaging
 
-The crate version (`rust/Cargo.toml`) feeds CLI and MCP identity. `make release`
-builds with search enabled; `make build` builds the three-tool parity binary.
+The crate version (`Cargo.toml`) feeds CLI and MCP identity. `make release`
+builds with search enabled; `make build` builds the four-tool core binary.
 `make install` copies the binary and MIT license under a prefix.
 `scripts/package-release.py` builds `firepanda-VERSION-OS-ARCH.tar.gz` plus a
 SHA-256 file containing the binary, README, docs, and the Lightpanda installer.

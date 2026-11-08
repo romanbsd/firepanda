@@ -8,7 +8,7 @@ tests verify its context/process cleanup rather than its internal memory safety.
 
 | Check | Command |
 | --- | --- |
-| Formatting | `cargo fmt --manifest-path rust/Cargo.toml --check` |
+| Formatting | `cargo fmt --check` |
 | Lints (both feature sets) | `make check` |
 | Unit tests (both feature sets) | `make test` |
 | Protocol/CLI contracts | `make gates` → `tests/protocol.py` |

@@ -2,9 +2,8 @@
 # `build`/`gates` exercise the core binary (4 tools); `release` adds search.
 
 CARGO ?= cargo
-MANIFEST ?= rust/Cargo.toml
-BINARY ?= rust/target/release/firepanda
-SEARCH_TARGET ?= rust/target-search
+BINARY ?= target/release/firepanda
+SEARCH_TARGET ?= target-search
 SEARCH_BINARY ?= $(SEARCH_TARGET)/release/firepanda
 LIGHTPANDA ?= .local/bin/lightpanda
 PREFIX ?= $(HOME)/.local
@@ -12,19 +11,19 @@ PREFIX ?= $(HOME)/.local
 .PHONY: build release test check gates search-gates install package clean
 
 build:
-	$(CARGO) build --manifest-path $(MANIFEST) --release
+	$(CARGO) build --release
 
 release:
-	$(CARGO) build --manifest-path $(MANIFEST) --release --features search
+	$(CARGO) build --release --features search
 
 test:
-	$(CARGO) test --manifest-path $(MANIFEST) --release
-	$(CARGO) test --manifest-path $(MANIFEST) --release --features search
+	$(CARGO) test --release
+	$(CARGO) test --release --features search
 
 check:
-	$(CARGO) fmt --manifest-path $(MANIFEST) --check
-	$(CARGO) clippy --manifest-path $(MANIFEST) --release --all-targets -- -D warnings
-	$(CARGO) clippy --manifest-path $(MANIFEST) --release --all-targets --features search -- -D warnings
+	$(CARGO) fmt --check
+	$(CARGO) clippy --release --all-targets -- -D warnings
+	$(CARGO) clippy --release --all-targets --features search -- -D warnings
 
 gates: build
 	python3 tests/protocol.py $(BINARY)
@@ -34,7 +33,7 @@ gates: build
 	python3 tests/memory.py $(BINARY) $(LIGHTPANDA)
 
 search-gates:
-	$(CARGO) build --manifest-path $(MANIFEST) --release --features search --target-dir $(SEARCH_TARGET)
+	$(CARGO) build --release --features search --target-dir $(SEARCH_TARGET)
 	python3 tests/search.py $(SEARCH_BINARY) $(LIGHTPANDA)
 
 install: release
@@ -46,5 +45,5 @@ package: release
 	python3 scripts/package-release.py --binary $(BINARY)
 
 clean:
-	$(CARGO) clean --manifest-path $(MANIFEST)
-	rm -rf rust/target-search dist
+	$(CARGO) clean
+	rm -rf target-search dist

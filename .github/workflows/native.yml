@@ -21,24 +21,24 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - run: cargo fmt --manifest-path rust/Cargo.toml --check
-      - run: cargo clippy --manifest-path rust/Cargo.toml --release --all-targets -- -D warnings
-      - run: cargo test --manifest-path rust/Cargo.toml --release
-      - run: cargo build --manifest-path rust/Cargo.toml --release
+      - run: cargo fmt --check
+      - run: cargo clippy --release --all-targets -- -D warnings
+      - run: cargo test --release
+      - run: cargo build --release
       - name: MCP protocol gate
-        run: python3 tests/protocol.py rust/target/release/firepanda
+        run: python3 tests/protocol.py target/release/firepanda
       - name: Adversarial CDP transport gate
-        run: python3 tests/transport.py rust/target/release/firepanda
+        run: python3 tests/transport.py target/release/firepanda
       - run: python3 scripts/install-lightpanda.py --release 1.0.2
       - name: Raw fetch gate
-        run: python3 tests/fetch.py rust/target/release/firepanda "$PWD/.local/bin/lightpanda"
+        run: python3 tests/fetch.py target/release/firepanda "$PWD/.local/bin/lightpanda"
       - name: Native integration gate
-        run: python3 tests/integration.py rust/target/release/firepanda "$PWD/.local/bin/lightpanda"
+        run: python3 tests/integration.py target/release/firepanda "$PWD/.local/bin/lightpanda"
       - name: Memory and descriptor hygiene gate
-        run: python3 tests/memory.py rust/target/release/firepanda "$PWD/.local/bin/lightpanda"
+        run: python3 tests/memory.py target/release/firepanda "$PWD/.local/bin/lightpanda"
       - name: Verify release packaging
         run: |
-          python3 scripts/package-release.py --binary rust/target/release/firepanda --output "$PWD/dist-check"
+          python3 scripts/package-release.py --binary target/release/firepanda --output "$PWD/dist-check"
           test -f "$PWD/dist-check/firepanda-"*.tar.gz
   rust-search:
     strategy:
@@ -57,17 +57,17 @@ jobs:
           components: rustfmt, clippy
       - name: Clippy with the search feature
         run: >-
-          cargo clippy --manifest-path rust/Cargo.toml --release --all-targets
-          --features search --target-dir rust/target-search -- -D warnings
+          cargo clippy --release --all-targets
+          --features search --target-dir target-search -- -D warnings
       - name: Unit tests with the search feature
         run: >-
-          cargo test --manifest-path rust/Cargo.toml --release --features search
-          --target-dir rust/target-search
+          cargo test --release --features search
+          --target-dir target-search
       - name: Build the search binary
         run: >-
-          cargo build --manifest-path rust/Cargo.toml --release --features search
-          --target-dir rust/target-search
+          cargo build --release --features search
+          --target-dir target-search
       - name: Offline search gate
         run: >-
-          python3 tests/search.py rust/target-search/release/firepanda
+          python3 tests/search.py target-search/release/firepanda
           "$PWD/.local/bin/lightpanda"

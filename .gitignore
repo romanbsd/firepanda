@@ -7,3 +7,5 @@ __pycache__/
 .ocr-review/
 .DS_Store
 /dist/
+/target
+/target-search
