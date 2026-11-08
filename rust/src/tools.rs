@@ -2,6 +2,8 @@
 //! Ported row-for-row from `src/tools.cpp`: schema bounds, defaults, and
 //! per-tool applicability all derive from the same static tables.
 
+mod crawl;
+
 use crate::browser::{Browser, PageRequest};
 use crate::json::as_integer;
 use serde_json::{Value, json};
@@ -9,8 +11,7 @@ use std::time::Duration;
 
 /// Frontier cap for crawl/map link discovery (M4).
 pub const MAX_LINKS: usize = 10000;
-/// Serialization budget for crawl results (M4).
-#[allow(dead_code)]
+/// Serialization budget for crawl results.
 const MAX_CRAWL_BYTES: usize = 4 * 1024 * 1024;
 const FORMATS: [&str; 5] = ["markdown", "text", "html", "rawHtml", "links"];
 
@@ -382,7 +383,6 @@ pub fn normalize_url(input: &str) -> Result<String, String> {
 }
 
 /// Call only after normalization; avoid reparsing for every crawl link.
-#[allow(dead_code)]
 pub fn origin(normalized: &str) -> &str {
     let after_scheme = normalized.find("://").map_or(normalized.len(), |i| i + 3);
     match normalized[after_scheme..].find('/') {
@@ -490,17 +490,21 @@ pub async fn execute(browser: &Browser, name: &str, args: &Value) -> Result<Valu
     if tool == Tool::Scrape {
         return browser.scrape(&request).await.map_err(CallError::Tool);
     }
-    // Validate the discovery-only bounds before anything reaches the browser.
-    parse_integer(args, "limit").map_err(CallError::Invalid)?;
-    parse_integer(args, "maxDepth").map_err(CallError::Invalid)?;
-    parse_integer(args, "maxConcurrency").map_err(CallError::Invalid)?;
-    // M4: BFS crawl/map pipeline lands here; today the first page dispatch
-    // surfaces the same browser-start failure a sequential crawl would.
-    browser.scrape(&request).await.map_err(CallError::Tool)
+    let limit = parse_integer(args, "limit").map_err(CallError::Invalid)?;
+    let max_depth = parse_integer(args, "maxDepth").map_err(CallError::Invalid)?;
+    let concurrency = parse_integer(args, "maxConcurrency").map_err(CallError::Invalid)?;
+    Ok(crawl::run(
+        browser,
+        tool,
+        request,
+        limit,
+        max_depth,
+        concurrency as usize,
+    )
+    .await)
 }
 
 /// Byte budget for one crawl page; mirrors `serialized_size_within`.
-#[allow(dead_code)]
 pub fn serialized_size_within(value: &Value, limit: usize) -> Option<usize> {
     let size = serde_json::to_string(value).ok()?.len();
     (size <= limit).then_some(size)

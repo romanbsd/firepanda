@@ -62,8 +62,8 @@ jobs:
       - name: Adversarial CDP transport gate
         run: python3 tests/transport.py rust/target/release/firepanda
       - run: python3 scripts/install-lightpanda.py --release 1.0.2
-      - name: Render parity gate (M3 core)
-        run: python3 tests/m3_core_check.py rust/target/release/firepanda "$PWD/.local/bin/lightpanda"
+      - name: Native integration parity gate
+        run: python3 tests/integration.py rust/target/release/firepanda "$PWD/.local/bin/lightpanda"
   sanitizers:
     runs-on: ubuntu-latest
     timeout-minutes: 15

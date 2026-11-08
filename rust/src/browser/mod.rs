@@ -114,6 +114,13 @@ pub struct Browser {
     inner: Arc<Inner>,
 }
 
+/// In-flight crawl page. `Failed` means the dispatch-thread checkout failed
+/// and no worker ran; `Running` owns a pooled connection until it resolves.
+pub enum PageTask {
+    Failed(String),
+    Running(tokio::task::JoinHandle<Result<Value, String>>),
+}
+
 impl Browser {
     pub fn new(options: Options, stop: Stop) -> Self {
         let owns_process = options.socket.is_empty();
@@ -168,6 +175,47 @@ impl Browser {
         // Inactivity starts after work completes, not when it starts.
         self.inner.process.lock().await.idle_since = Some(Instant::now());
         Ok(result)
+    }
+
+    /// Fetch one page on a pool connection for the crawl loop (C++
+    /// `scrape_async`). The dispatch task checks out inline — launching the
+    /// managed browser if needed — so concurrent pages can never race a second
+    /// spawn; a checkout failure surfaces as `Failed` without releasing the
+    /// browser, which the crawl loop reaps after draining siblings.
+    pub async fn start_page(&self, request: PageRequest) -> PageTask {
+        self.inner.process.lock().await.idle_since = None;
+        let start = Instant::now();
+        let deadline = start + request.timeout;
+        let connect_deadline = std::cmp::min(deadline, start + CONNECT_WINDOW);
+        let connection = match self.checkout(connect_deadline).await {
+            Ok(connection) => connection,
+            Err(message) => return PageTask::Failed(message),
+        };
+        let inner = Arc::clone(&self.inner);
+        PageTask::Running(tokio::spawn(async move {
+            let mut connection = connection;
+            let result = cdp::run_scrape(&mut connection, &request, deadline)
+                .await
+                .map_err(ScrapeError::message);
+            // Only healthy connections return to the pool; an error destroys
+            // this one and the crawl loop reaps the browser after draining.
+            if result.is_ok() && connection.is_open() {
+                inner.free.lock().await.push(connection);
+            }
+            result
+        }))
+    }
+
+    /// Inactivity starts after work completes, not when it starts (C++
+    /// `page_completed`; main thread only, between dispatch and recording).
+    pub async fn page_completed(&self) {
+        self.inner.process.lock().await.idle_since = Some(Instant::now());
+    }
+
+    /// Stop flag for the crawl loop's dispatch condition (C++
+    /// `stop_requested`).
+    pub fn stopped(&self) -> bool {
+        self.inner.stop.stopped()
     }
 
     /// Pop a pooled connection or open a fresh one (C++ `checkout`).
