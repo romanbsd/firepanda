@@ -72,6 +72,7 @@ try:
     assert [w["code"] for w in error_page["warnings"]] == ["suspected_error_page"], error_page
     actual_error = tool("scrape", url=url + "/http-redirect")
     assert actual_error["metadata"]["httpStatus"] == 503, actual_error
+    assert actual_error["metadata"]["statusCode"] == 503, actual_error
     assert [w["code"] for w in actual_error["warnings"]] == ["http_error"], actual_error
     good = tool("scrape", url=url + "/http-ok-subframe")
     assert good["metadata"]["httpStatus"] == 200 and "warnings" not in good, good

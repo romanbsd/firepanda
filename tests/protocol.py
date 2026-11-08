@@ -55,8 +55,20 @@ class Protocol(unittest.TestCase):
             for name in ("waitForSelector", "waitForText"):
                 self.assertEqual(properties[name]["type"], "string")
                 self.assertEqual(properties[name]["minLength"], 1)
+            # Every tool is a read-only, idempotent network reader.
+            self.assertTrue(tool.get("title"))
+            self.assertEqual(tool["annotations"]["readOnlyHint"], True)
+            self.assertEqual(tool["annotations"]["destructiveHint"], False)
+            self.assertEqual(tool["annotations"]["idempotentHint"], True)
+            self.assertEqual(tool["annotations"]["openWorldHint"], True)
             # Concurrency applies to crawl/map only; scrape stays single-page.
             self.assertEqual("maxConcurrency" in properties, tool["name"] != "scrape")
+            if tool["name"] == "map":
+                # Map always extracts links: projection options would be no-ops.
+                self.assertNotIn("formats", properties)
+                self.assertNotIn("onlyMainContent", properties)
+            else:
+                self.assertIn("formats", properties)
             if tool["name"] != "scrape":
                 self.assertEqual(properties["maxConcurrency"]["default"], 4)
                 self.assertEqual(properties["maxConcurrency"]["minimum"], 1)
@@ -81,6 +93,12 @@ class Protocol(unittest.TestCase):
         out = run([message(i, "tools/call", _meta=META, name="scrape", arguments=a) for i, a in enumerate(args)])
         self.assertEqual([x["id"] for x in out], list(range(len(args))))
         self.assertTrue(all(x["error"]["code"] == -32602 for x in out))
+        # Map always extracts links, so projection options are rejected too.
+        out = run([
+            message(1, "tools/call", _meta=META, name="map", arguments={"url": "https://example.com", "formats": ["links"]}),
+            message(2, "tools/call", _meta=META, name="map", arguments={"url": "https://example.com", "onlyMainContent": False}),
+        ])
+        self.assertEqual([x["error"]["code"] for x in out], [-32602, -32602])
         out = run([message(1, "tools/call", _meta=META, name="scrape", arguments={"url": "https://example.com"})])
         self.assertTrue(out[0]["result"]["isError"])
         self.assertIn("Cannot start Lightpanda", out[0]["result"]["content"][0]["text"])

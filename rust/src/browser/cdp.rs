@@ -496,6 +496,9 @@ fn validate_extraction(result: &mut Value, request: &PageRequest) -> Result<(), 
 
 fn apply_http_status(result: &mut Value, status: i64) {
     result["metadata"]["httpStatus"] = json!(status);
+    // Firecrawl names the same value `statusCode`; emit both so clients can
+    // read either without a translation layer.
+    result["metadata"]["statusCode"] = json!(status);
     if status < 400 {
         return;
     }

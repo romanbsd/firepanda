@@ -27,7 +27,19 @@ pub enum Tool {
 struct ToolDef {
     id: Tool,
     name: &'static str,
+    title: &'static str,
     description: &'static str,
+}
+
+/// MCP behavior hints shared by every tool: all are read-only, idempotent
+/// network readers with no destructive side effects.
+pub fn annotations() -> Value {
+    json!({
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+    })
 }
 
 /// One row per tool: dispatch and tools/list both read this table.
@@ -35,18 +47,21 @@ static TOOL_TABLE: &[ToolDef] = &[
     ToolDef {
         id: Tool::Scrape,
         name: "scrape",
+        title: "Scrape page",
         description: "Render a page with native Lightpanda and extract content. Markdown \
                       supports common article elements.",
     },
     ToolDef {
         id: Tool::Crawl,
         name: "crawl",
+        title: "Crawl site",
         description: "Breadth-first crawl of same-origin pages. Returns pages and per-page \
                       errors; bounded by depth, page count, 120 seconds, and result size.",
     },
     ToolDef {
         id: Tool::Map,
         name: "map",
+        title: "Map links",
         description: "Discover links with a bounded same-origin crawl. External links are \
                       listed but never followed. Not a sitemap or search engine.",
     },
@@ -54,6 +69,7 @@ static TOOL_TABLE: &[ToolDef] = &[
     ToolDef {
         id: Tool::Search,
         name: "search",
+        title: "Search the web",
         description: crate::search::DESCRIPTION,
     },
 ];
@@ -80,6 +96,8 @@ struct OptionDef {
     maximum: i64,
     /// Accepted by crawl/map; rejected by scrape.
     discovery_only: bool,
+    /// Ignored by map, which always extracts links only; rejected there.
+    map_ignored: bool,
 }
 
 macro_rules! opt {
@@ -92,6 +110,7 @@ macro_rules! opt {
             minimum: 0,
             maximum: 0,
             discovery_only: false,
+            map_ignored: false,
         }
     };
     ($name:literal, $kind:expr, $description:literal, fallback = $fallback:expr, minimum = $minimum:expr, maximum = $maximum:expr) => {
@@ -103,6 +122,7 @@ macro_rules! opt {
             minimum: $minimum,
             maximum: $maximum,
             discovery_only: false,
+            map_ignored: false,
         }
     };
 }
@@ -113,15 +133,26 @@ const OPTIONS: [OptionDef; 10] = [
         OptionKind::Url,
         "Absolute HTTP(S) URL without credentials"
     ),
-    opt!("formats", OptionKind::Formats, "Output formats to extract"),
-    opt!(
-        "onlyMainContent",
-        OptionKind::Boolean,
-        "Remove common page chrome and prefer main/article content",
-        fallback = 1,
-        minimum = 0,
-        maximum = 0
-    ),
+    OptionDef {
+        name: "formats",
+        kind: OptionKind::Formats,
+        description: "Output formats to extract",
+        fallback: 0,
+        minimum: 0,
+        maximum: 0,
+        discovery_only: false,
+        map_ignored: true,
+    },
+    OptionDef {
+        name: "onlyMainContent",
+        kind: OptionKind::Boolean,
+        description: "Remove common page chrome and prefer main/article content",
+        fallback: 1,
+        minimum: 0,
+        maximum: 0,
+        discovery_only: false,
+        map_ignored: true,
+    },
     opt!(
         "timeout",
         OptionKind::Integer,
@@ -162,6 +193,7 @@ const OPTIONS: [OptionDef; 10] = [
         minimum: 1,
         maximum: 100,
         discovery_only: true,
+        map_ignored: false,
     },
     OptionDef {
         name: "maxDepth",
@@ -171,6 +203,7 @@ const OPTIONS: [OptionDef; 10] = [
         minimum: 0,
         maximum: 5,
         discovery_only: true,
+        map_ignored: false,
     },
     OptionDef {
         name: "maxConcurrency",
@@ -180,6 +213,7 @@ const OPTIONS: [OptionDef; 10] = [
         minimum: 1,
         maximum: 16,
         discovery_only: true,
+        map_ignored: false,
     },
 ];
 
@@ -404,7 +438,9 @@ pub fn parse_request(args: &Value, tool: Tool) -> Result<PageRequest, String> {
         let Some(known) = find_option(key) else {
             return Err(format!("Unknown argument: {key}"));
         };
-        if known.discovery_only && tool == Tool::Scrape {
+        if (known.discovery_only && tool == Tool::Scrape)
+            || (known.map_ignored && tool == Tool::Map)
+        {
             return Err(format!("Unknown argument: {key}"));
         }
     }
@@ -459,13 +495,16 @@ pub fn tools_list() -> Value {
                 }
                 let mut properties = serde_json::Map::new();
                 for option in &OPTIONS {
-                    if option.discovery_only && entry.id == Tool::Scrape {
+                    let inapplicable = (option.discovery_only && entry.id == Tool::Scrape)
+                        || (option.map_ignored && entry.id == Tool::Map);
+                    if inapplicable {
                         continue;
                     }
                     properties.insert(option.name.to_string(), schema_of(option));
                 }
                 json!({
                     "name": entry.name,
+                    "title": entry.title,
                     "description": entry.description,
                     "inputSchema": {
                         "type": "object",
@@ -473,11 +512,7 @@ pub fn tools_list() -> Value {
                         "required": ["url"],
                         "additionalProperties": false,
                     },
-                    "annotations": {
-                        "readOnlyHint": true,
-                        "destructiveHint": false,
-                        "openWorldHint": true,
-                    },
+                    "annotations": annotations(),
                 })
             })
             .collect();

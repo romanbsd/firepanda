@@ -137,6 +137,8 @@ try:
     assert names == ["scrape", "crawl", "map", "search"], names
     search = schema[3]
     assert search["inputSchema"]["required"] == ["query"], search
+    assert search["title"] == "Search the web", search
+    assert search["annotations"]["idempotentHint"] is True, search
     assert set(search["inputSchema"]["properties"]) == {"query", "limit", "engine", "timeout"}
     assert search["inputSchema"]["additionalProperties"] is False
 finally:

@@ -130,6 +130,7 @@ fn bounded_integer(value: &Value, name: &str, minimum: i64, maximum: i64) -> Res
 pub fn tool_definition() -> Value {
     json!({
         "name": "search",
+        "title": "Search the web",
         "description": DESCRIPTION,
         "inputSchema": {
             "type": "object",
@@ -164,11 +165,7 @@ pub fn tool_definition() -> Value {
             "required": ["query"],
             "additionalProperties": false,
         },
-        "annotations": {
-            "readOnlyHint": true,
-            "destructiveHint": false,
-            "openWorldHint": true,
-        },
+        "annotations": crate::tools::annotations(),
     })
 }
 

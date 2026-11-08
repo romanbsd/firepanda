@@ -165,7 +165,8 @@ iframe documents, shadow trees, or canvas pixels. There is no network-idle heuri
 ### Results and errors
 
 `scrape` returns requested fields plus `metadata` (`url`, `sourceURL`, `title`,
-`description`, and `httpStatus` when observed). Links have `{url, title}` records.
+`description`, and `httpStatus`/`statusCode` when observed). `statusCode` is the
+Firecrawl-compatible alias of `httpStatus`. Links have `{url, title}` records.
 `crawl` returns `pages`, `attempted`, `errors`, and `truncated`.
 `map` returns `links`, `attempted`, `errors`, and `truncated`.
 `search` returns Firecrawl v2-shaped data: `{"success": true, "data": {"web":
@@ -194,6 +195,9 @@ Invalid arguments are JSON-RPC errors. Browser/extraction failures are MCP tool
 errors; crawl/map also report per-page errors, and search reports engine/network
 failures as tool errors. Use readiness conditions for content that loads after the
 initial page-load event. Firepanda does not bypass access controls.
+
+See [Firecrawl parity](docs/firecrawl-parity.md) for the implemented subset and
+intentional response-shape differences.
 
 Search is keyless and local: requests use primp browser impersonation to the
 DuckDuckGo HTML endpoint (Brave as fallback). Engine availability depends on the
