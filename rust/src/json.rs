@@ -65,9 +65,20 @@ pub fn as_integer(value: &serde_json::Value) -> Option<i128> {
     number.as_i64().map(|signed| signed as i128)
 }
 
+/// Serialized size of `value` when it fits in `limit` bytes, else `None`.
+/// Uses the same compact serializer as the final tool result, so the crawl's
+/// 4 MiB budget matches what the client would receive. Rust's `Value` cannot
+/// hold invalid UTF-8 (the C++ `dump()` type_error case), so the serializer
+/// is infallible here; the error arm stays as a defensive mapping to
+/// "budget unavailable".
+pub fn serialized_size_within(value: &Value, limit: usize) -> Option<usize> {
+    let size = serde_json::to_string(value).ok()?.len();
+    (size <= limit).then_some(size)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ParseError, as_integer, check_depth, parse_line};
+    use super::{ParseError, as_integer, check_depth, parse_line, serialized_size_within};
 
     #[test]
     fn deep_nesting_rejected() {
@@ -100,5 +111,54 @@ mod tests {
         assert_eq!(as_integer(&overflow), None);
         assert!(parse_line(b"{").is_err());
         assert!(parse_line(b"").is_err());
+    }
+
+    /// Port of `tests/json.cpp`: every limit boundary around the exact
+    /// serialized size, for the same value zoo the C++ suite walks.
+    fn check(value: serde_json::Value) {
+        let expected = serde_json::to_string(&value).unwrap().len();
+        assert_eq!(serialized_size_within(&value, expected), Some(expected));
+        assert_eq!(serialized_size_within(&value, expected + 1), Some(expected));
+        assert_eq!(
+            serialized_size_within(&value, expected.saturating_sub(1)),
+            None
+        );
+        assert_eq!(serialized_size_within(&value, 0), None);
+        assert_eq!(serialized_size_within(&value, usize::MAX), Some(expected));
+    }
+
+    #[test]
+    fn serialized_size_boundaries_match_dump() {
+        use serde_json::{Value, json};
+        // nlohmann dumps non-finite doubles as null; serde_json maps
+        // non-finite floats to null on serialization, so both land on the
+        // same 4-byte payload.
+        let infinity = serde_json::to_value(f64::INFINITY).unwrap();
+        assert_eq!(infinity, Value::Null);
+        for value in [
+            Value::Null,
+            json!(true),
+            json!(false),
+            json!(-42),
+            json!(u64::MAX),
+            json!(1.234e-50),
+            infinity,
+            json!(""),
+            json!("quotes\" slash\\ newline\n\t\u{1} UTF-8: é🐼"),
+            json!([]),
+            json!({}),
+            json!({"nested": [1, "two", Value::Null, [true, false]]}),
+        ] {
+            check(value);
+        }
+        check(json!({"text": "\n".repeat(256 * 1024)}));
+        check(json!({"text": "x".repeat(4 * 1024 * 1024)}));
+        // The C++ suite's invalid-UTF-8 dump() error has no Rust equivalent:
+        // Value::String is UTF-8 by construction, and serialization of a
+        // Value cannot fail.
+        assert_eq!(
+            serialized_size_within(&json!("\u{fffd}"), 100),
+            Some(serde_json::to_string(&json!("\u{fffd}")).unwrap().len())
+        );
     }
 }

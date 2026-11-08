@@ -5,8 +5,9 @@
 //! siblings (keeping their results) before the browser is reaped and
 //! relaunched.
 
-use super::{MAX_CRAWL_BYTES, MAX_LINKS, Tool, normalize_url, origin, serialized_size_within};
+use super::{MAX_CRAWL_BYTES, MAX_LINKS, Tool, normalize_url, origin};
 use crate::browser::{Browser, PageRequest, PageTask};
+use crate::json::serialized_size_within;
 use serde_json::{Value, json};
 use std::collections::{HashSet, VecDeque};
 use std::time::{Duration, Instant};

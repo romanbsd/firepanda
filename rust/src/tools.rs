@@ -504,12 +504,6 @@ pub async fn execute(browser: &Browser, name: &str, args: &Value) -> Result<Valu
     .await)
 }
 
-/// Byte budget for one crawl page; mirrors `serialized_size_within`.
-pub fn serialized_size_within(value: &Value, limit: usize) -> Option<usize> {
-    let size = serde_json::to_string(value).ok()?.len();
-    (size <= limit).then_some(size)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
