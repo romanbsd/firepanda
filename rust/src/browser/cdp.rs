@@ -1,0 +1,619 @@
+//! One CDP connection: deadline-bounded reads, command round-trips, and the
+//! per-page scrape pipeline. Ported from `Connection`/`run_scrape` in
+//! `src/browser.cpp`; `tests/transport.py` pins the adversarial behavior.
+
+use super::{PageRequest, Stop};
+use crate::json::{ParseError, check_depth};
+use crate::tools::MAX_LINKS;
+use futures_util::{SinkExt, StreamExt};
+use serde_json::{Value, json};
+use std::time::{Duration, Instant};
+use tokio_tungstenite::tungstenite::Message;
+
+/// In-page extractor, embedded verbatim from the C++ build (the C++ binary
+/// embeds it through extraction.hpp.in).
+const EXTRACTION_JS: &str = include_str!("../../../src/extract.js");
+
+const STOPPING: &str = "Service is stopping";
+const STOPPED: &str = "Lightpanda operation timed out or service is stopping";
+const TIMED_OUT: &str = "Lightpanda operation timed out";
+const DISCONNECTED: &str = "Lightpanda CDP disconnected or returned a non-text frame";
+
+/// CDP rejection (peer answered with an `error` object) versus transport,
+/// deadline, stop, and validation failures. Both surface as tool errors;
+/// only `Network.enable` distinguishes them.
+#[derive(Debug)]
+pub enum ScrapeError {
+    Cdp(String),
+    Fatal(String),
+}
+
+impl ScrapeError {
+    pub fn message(self) -> String {
+        match self {
+            Self::Cdp(message) | Self::Fatal(message) => message,
+        }
+    }
+
+    fn fatal(message: impl Into<String>) -> Self {
+        Self::Fatal(message.into())
+    }
+}
+
+/// CDP mixes replies and events on one socket; non-string members read as "".
+fn string_member<'a>(object: &'a Value, key: &str) -> &'a str {
+    object.get(key).and_then(Value::as_str).unwrap_or("")
+}
+
+/// Isolated context and flattened session for one page fetch.
+struct PageTarget {
+    context: String,
+    session: String,
+}
+
+pub struct Connection {
+    ws: Option<tokio_tungstenite::WebSocketStream<tokio::net::UnixStream>>,
+    stop: Stop,
+    next_id: u64,
+    active_session: String,
+    page_loaded: bool,
+    main_frame: String,
+    http_status: Option<i64>,
+    early_document_statuses: Vec<(String, i64)>,
+}
+
+impl Connection {
+    pub fn new(stop: Stop) -> Self {
+        Self {
+            ws: None,
+            stop,
+            next_id: 0,
+            active_session: String::new(),
+            page_loaded: false,
+            main_frame: String::new(),
+            http_status: None,
+            early_document_statuses: Vec::new(),
+        }
+    }
+
+    pub fn is_open(&self) -> bool {
+        self.ws.is_some()
+    }
+
+    pub fn attach(
+        &mut self,
+        websocket: tokio_tungstenite::WebSocketStream<tokio::net::UnixStream>,
+    ) {
+        self.ws = Some(websocket);
+    }
+
+    /// Read one CDP message before `deadline`, or fail. `StreamExt::next` is
+    /// cancel-safe, so the stop/deadline arms of the select can drop a pending
+    /// read without losing buffered bytes.
+    async fn receive(&mut self, deadline: Instant) -> Result<Value, String> {
+        loop {
+            if self.stop.stopped() {
+                return Err(STOPPING.to_string());
+            }
+            if Instant::now() >= deadline {
+                return Err(TIMED_OUT.to_string());
+            }
+            let ws = self.ws.as_mut().ok_or_else(|| DISCONNECTED.to_string())?;
+            let read = tokio::select! {
+                _ = self.stop.wait() => return Err(STOPPING.to_string()),
+                _ = tokio::time::sleep_until(deadline.into()) => return Err(TIMED_OUT.to_string()),
+                message = ws.next() => message,
+            };
+            // A read finishing at/after the deadline failed like the C++
+            // SocketDeadline shutdown, not like a clean timeout.
+            if self.stop.stopped() || Instant::now() >= deadline {
+                return Err(STOPPED.to_string());
+            }
+            match read {
+                // The stream ending (None) is a disconnect like a close frame.
+                None => return Err(DISCONNECTED.to_string()),
+                Some(Ok(Message::Text(text))) => return parse_message(text.as_str()),
+                Some(Ok(Message::Ping(payload))) => {
+                    // Lightpanda may keepalive mid-scrape; answering inside the
+                    // read loop keeps a control frame from failing the page.
+                    ws.send(Message::Pong(payload))
+                        .await
+                        .map_err(|_| DISCONNECTED.to_string())?;
+                }
+                Some(Ok(Message::Pong(_))) | Some(Ok(Message::Frame(_))) => {}
+                Some(Ok(Message::Close(_))) | Some(Ok(Message::Binary(_))) | Some(Err(_)) => {
+                    return Err(DISCONNECTED.to_string());
+                }
+            }
+        }
+    }
+
+    /// Fold the events that matter for one page (load flag, main-document
+    /// status) without retaining multi-megabyte event bodies.
+    fn observe(&mut self, message: &Value) {
+        let method = string_member(message, "method");
+        let session_id = string_member(message, "sessionId");
+        if method == "Page.loadEventFired" && session_id == self.active_session {
+            self.page_loaded = true;
+        }
+        if method != "Network.responseReceived" || session_id != self.active_session {
+            return;
+        }
+        let Some(params) = message.get("params").filter(|value| value.is_object()) else {
+            return;
+        };
+        if string_member(params, "type") != "Document" {
+            return;
+        }
+        let frame = match params.get("frameId") {
+            Some(Value::String(id)) if id.len() <= 256 => id,
+            _ => return,
+        };
+        let Some(response) = params.get("response").filter(|value| value.is_object()) else {
+            return;
+        };
+        // Status must be an integer 100..=599: 201.5 and 99/600 never become
+        // an httpStatus (C++ compares get<int> back against the number).
+        let number = match response.get("status").and_then(Value::as_f64) {
+            Some(status) if (100.0..=599.0).contains(&status) => {
+                let truncated = status as i64;
+                if status != truncated as f64 {
+                    return;
+                }
+                truncated
+            }
+            _ => return,
+        };
+        if !self.main_frame.is_empty() {
+            // Subframe responses cannot overwrite the document.
+            if *frame == self.main_frame {
+                self.http_status = Some(number);
+            }
+        } else if let Some(entry) = self
+            .early_document_statuses
+            .iter_mut()
+            .find(|(id, _)| id == frame)
+        {
+            entry.1 = number;
+        } else if self.early_document_statuses.len() < 16 {
+            self.early_document_statuses.push((frame.clone(), number));
+        }
+    }
+
+    /// Send one command and wait for its reply; events observed along the way.
+    async fn call(
+        &mut self,
+        method: &str,
+        params: Value,
+        session: &str,
+        deadline: Instant,
+    ) -> Result<Value, ScrapeError> {
+        self.next_id += 1;
+        let id = self.next_id;
+        let mut request = json!({"id": id, "method": method, "params": params});
+        if !session.is_empty() {
+            request["sessionId"] = json!(session);
+        }
+        let Ok(payload) = serde_json::to_string(&request) else {
+            return Err(ScrapeError::fatal("Cannot write Lightpanda CDP command"));
+        };
+        let ws = self
+            .ws
+            .as_mut()
+            .ok_or_else(|| ScrapeError::fatal(DISCONNECTED))?;
+        // The deadline owns writes too: a peer that stops reading must not
+        // outlive the operation (C++ SocketDeadline shuts the socket down).
+        let sent = tokio::select! {
+            _ = self.stop.wait() => return Err(ScrapeError::fatal(STOPPING)),
+            sent = tokio::time::timeout_at(deadline.into(), ws.send(Message::text(payload))) => sent,
+        };
+        if !matches!(sent, Ok(Ok(()))) {
+            return Err(ScrapeError::fatal("Cannot write Lightpanda CDP command"));
+        }
+        loop {
+            let response = self.receive(deadline).await.map_err(ScrapeError::fatal)?;
+            let Some(object) = response.as_object() else {
+                return Err(ScrapeError::fatal("CDP response must be an object"));
+            };
+            match object.get("id") {
+                // No id (0 in C++) can never match; keep observing.
+                None => {
+                    self.observe(&response);
+                    continue;
+                }
+                Some(value) => match crate::json::as_integer(value) {
+                    None => return Err(ScrapeError::fatal("CDP response id must be an integer")),
+                    Some(number) if number != id as i128 => {
+                        self.observe(&response);
+                        continue;
+                    }
+                    Some(_) => {}
+                },
+            }
+            let has_result = object.get("result").is_some();
+            let has_error = object.get("error").is_some();
+            if (!session.is_empty() && string_member(&response, "sessionId") != session)
+                || has_result == has_error
+            {
+                return Err(ScrapeError::fatal("Malformed CDP response envelope"));
+            }
+            if has_error {
+                return Err(ScrapeError::Cdp(format!("{method}: {}", object["error"])));
+            }
+            let result = object
+                .get("result")
+                .filter(|value| value.is_object())
+                .ok_or_else(|| ScrapeError::fatal("CDP result must be an object"))?;
+            return Ok(result.clone());
+        }
+    }
+
+    async fn loaded(&mut self, deadline: Instant) -> Result<(), ScrapeError> {
+        while !self.page_loaded {
+            let message = self.receive(deadline).await.map_err(ScrapeError::fatal)?;
+            self.observe(&message);
+        }
+        Ok(())
+    }
+}
+
+/// CDP parse with the same 64-level stack bound as MCP input (C++
+/// `parse_json`), reported with the CDP wrapper message.
+fn parse_message(text: &str) -> Result<Value, String> {
+    if let Err(ParseError::Nesting(message)) = check_depth(text.as_bytes()) {
+        return Err(format!("Invalid CDP JSON: {message}"));
+    }
+    serde_json::from_str(text).map_err(|error| format!("Invalid CDP JSON: {error}"))
+}
+
+/// Isolated context + flattened session for this page. `disposeOnDetach`
+/// releases the context even when the stream dies mid-scrape.
+async fn open_page(
+    connection: &mut Connection,
+    deadline: Instant,
+) -> Result<PageTarget, ScrapeError> {
+    let context = connection
+        .call(
+            "Target.createBrowserContext",
+            json!({"disposeOnDetach": true}),
+            "",
+            deadline,
+        )
+        .await?
+        .get("browserContextId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ScrapeError::fatal("Missing browserContextId in CDP result"))?
+        .to_string();
+    let page = connection
+        .call(
+            "Target.createTarget",
+            json!({"url": "about:blank", "browserContextId": context}),
+            "",
+            deadline,
+        )
+        .await?
+        .get("targetId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ScrapeError::fatal("Missing targetId in CDP result"))?
+        .to_string();
+    let session = connection
+        .call(
+            "Target.attachToTarget",
+            json!({"targetId": page, "flatten": true}),
+            "",
+            deadline,
+        )
+        .await?
+        .get("sessionId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ScrapeError::fatal("Missing sessionId in CDP result"))?
+        .to_string();
+    connection.active_session = session.clone();
+    connection.main_frame.clear();
+    connection.http_status = None;
+    connection.early_document_statuses.clear();
+    Ok(PageTarget { context, session })
+}
+
+/// Enable the domains extraction needs, navigate, and wait for page load.
+async fn navigate(
+    connection: &mut Connection,
+    request: &PageRequest,
+    session: &str,
+    deadline: Instant,
+) -> Result<(), ScrapeError> {
+    connection
+        .call("Page.enable", json!({}), session, deadline)
+        .await?;
+    if let Err(ScrapeError::Cdp(_)) = connection
+        .call("Network.enable", json!({}), session, deadline)
+        .await
+    {
+        // Older CDP peers may lack Network; transport/timeouts still fail.
+    }
+    connection.page_loaded = false;
+    let navigation = connection
+        .call(
+            "Page.navigate",
+            json!({"url": request.url}),
+            session,
+            deadline,
+        )
+        .await?;
+    connection.main_frame = string_member(&navigation, "frameId").to_string();
+    // Responses observed before the frame id was known belong to the document
+    // only if they match the main frame; subframes never overwrite it.
+    let early = std::mem::take(&mut connection.early_document_statuses);
+    for (frame, status) in early {
+        if !connection.main_frame.is_empty() && frame == connection.main_frame {
+            connection.http_status = Some(status);
+        }
+    }
+    if navigation.get("errorText").is_some() {
+        let text = navigation["errorText"]
+            .as_str()
+            .ok_or_else(|| ScrapeError::fatal("Page.navigate errorText must be a string"))?;
+        return Err(ScrapeError::fatal(text));
+    }
+    connection.loaded(deadline).await
+}
+
+/// Sleep in short slices so SIGTERM still tears down the owned child promptly.
+async fn wait_after_load(
+    request: &PageRequest,
+    deadline: Instant,
+    stop: &Stop,
+) -> Result<(), ScrapeError> {
+    let now = Instant::now();
+    if now + request.wait_for >= deadline {
+        return Err(ScrapeError::fatal(
+            "waitFor exceeds remaining operation timeout",
+        ));
+    }
+    let wait_end = now + request.wait_for;
+    while Instant::now() < wait_end {
+        if stop.stopped() {
+            return Err(ScrapeError::fatal(STOPPING));
+        }
+        let slice = std::cmp::min(wait_end, Instant::now() + Duration::from_millis(50));
+        tokio::select! {
+            _ = stop.wait() => return Err(ScrapeError::fatal(STOPPING)),
+            _ = tokio::time::sleep_until(slice.into()) => {}
+        }
+    }
+    Ok(())
+}
+
+/// Evaluate the embedded extractor once in the page context.
+async fn extract(
+    connection: &mut Connection,
+    request: &PageRequest,
+    session: &str,
+    deadline: Instant,
+) -> Result<Value, ScrapeError> {
+    let remaining = deadline
+        .saturating_duration_since(Instant::now())
+        .as_millis()
+        .min(i64::MAX as u128) as i64;
+    let extraction = json!({
+        "maxLinks": MAX_LINKS,
+        "formats": request.formats,
+        "onlyMainContent": request.only_main_content,
+        "waitForSelector": request.wait_for_selector,
+        "waitForText": request.wait_for_text,
+        "readyTimeout": remaining,
+    });
+    let expression = format!("{EXTRACTION_JS}({extraction})");
+    let value = connection
+        .call(
+            "Runtime.evaluate",
+            json!({
+                "expression": expression,
+                "returnByValue": true,
+                "awaitPromise": true,
+            }),
+            session,
+            deadline,
+        )
+        .await?;
+    if value.get("exceptionDetails").is_some() {
+        return Err(ScrapeError::fatal(format!(
+            "Page extraction failed: {}",
+            value["exceptionDetails"]
+        )));
+    }
+    value
+        .get("result")
+        .and_then(|inner| inner.get("value"))
+        .cloned()
+        .ok_or_else(|| ScrapeError::fatal("Page extraction failed: missing result value"))
+}
+
+/// Reject malformed page payloads before they enter a crawl result.
+fn validate_extraction(result: &mut Value, request: &PageRequest) -> Result<(), ScrapeError> {
+    let metadata_ok = result
+        .get("metadata")
+        .filter(|value| value.is_object())
+        .and_then(|metadata| metadata.get("url"))
+        .map(Value::is_string)
+        .unwrap_or(false);
+    if !metadata_ok {
+        return Err(ScrapeError::fatal("Malformed page extraction metadata"));
+    }
+    for format in &request.formats {
+        let valid = match result.get(format.as_str()) {
+            None => false,
+            Some(value) if format == "links" => value.is_array(),
+            Some(value) => value.is_string(),
+        };
+        if !valid {
+            return Err(ScrapeError::fatal(format!(
+                "Missing or invalid extraction format: {format}"
+            )));
+        }
+    }
+    if let Some(links) = result.get("links") {
+        let array = links.as_array().filter(|links| links.len() <= MAX_LINKS);
+        let Some(links) = array else {
+            return Err(ScrapeError::fatal("Invalid extraction links"));
+        };
+        for link in links {
+            let valid = link.is_object()
+                && link.get("url").map(Value::is_string).unwrap_or(false)
+                && (link.get("title").is_none() || link["title"].is_string());
+            if !valid {
+                return Err(ScrapeError::fatal("Malformed extraction link"));
+            }
+        }
+    }
+    if let Some(flag) = result.get("linksTruncated")
+        && !flag.is_boolean()
+    {
+        return Err(ScrapeError::fatal("Invalid extraction truncation flag"));
+    }
+    result["metadata"]["sourceURL"] = json!(request.url);
+    if let Some(warnings) = result.get("warnings") {
+        let array = warnings.as_array().filter(|warnings| warnings.len() <= 3);
+        let Some(warnings) = array else {
+            return Err(ScrapeError::fatal("Malformed extraction warnings"));
+        };
+        for warning in warnings {
+            let code_ok = warning
+                .get("code")
+                .and_then(Value::as_str)
+                .is_some_and(|code| code.len() <= 64);
+            let message_ok = warning
+                .get("message")
+                .and_then(Value::as_str)
+                .is_some_and(|message| message.len() <= 512);
+            if !warning.is_object() || !code_ok || !message_ok {
+                return Err(ScrapeError::fatal("Malformed extraction warning"));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn apply_http_status(result: &mut Value, status: i64) {
+    result["metadata"]["httpStatus"] = json!(status);
+    if status < 400 {
+        return;
+    }
+    if result.get("warnings").is_none() {
+        result["warnings"] = json!([]);
+    }
+    if let Some(array) = result.get_mut("warnings").and_then(Value::as_array_mut) {
+        array.push(json!({
+            "code": "http_error",
+            "message": format!("Document returned HTTP {status}"),
+        }));
+    }
+}
+
+/// One page fetch on an already connected connection. Errors propagate to the
+/// caller; only `Browser::scrape` decides whether to reap the browser.
+pub async fn run_scrape(
+    connection: &mut Connection,
+    request: &PageRequest,
+    deadline: Instant,
+) -> Result<Value, ScrapeError> {
+    let target = open_page(connection, deadline).await?;
+    navigate(connection, request, &target.session, deadline).await?;
+    wait_after_load(request, deadline, &connection.stop).await?;
+    let mut result = extract(connection, request, &target.session, deadline).await?;
+    validate_extraction(&mut result, request)?;
+    if let Some(status) = connection.http_status {
+        apply_http_status(&mut result, status);
+    }
+    connection
+        .call(
+            "Target.disposeBrowserContext",
+            json!({"browserContextId": target.context}),
+            "",
+            deadline,
+        )
+        .await?;
+    Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cdp_parse_enforces_nesting_bound() {
+        let deep = format!("{}0{}", "[".repeat(5000), "]".repeat(5000));
+        let error = parse_message(&deep).unwrap_err();
+        assert!(
+            error.contains("Invalid CDP JSON: JSON nesting exceeds 64 levels"),
+            "{error}"
+        );
+        assert!(parse_message("[]").is_ok());
+        assert!(parse_message("{").is_err());
+    }
+
+    #[test]
+    fn status_observation_is_main_document_only() {
+        let mut connection = Connection::new(Stop::channel());
+        connection.active_session = "session".to_string();
+        let event = |frame: &str, status: Value| {
+            json!({
+                "method": "Network.responseReceived",
+                "sessionId": "session",
+                "params": {"type": "Document", "frameId": frame, "response": {"status": status}},
+            })
+        };
+        connection.observe(&event("main", json!(201.5)));
+        connection.observe(&event("child", json!(503)));
+        assert!(connection.http_status.is_none());
+        assert_eq!(
+            connection.early_document_statuses,
+            [("child".to_string(), 503)]
+        );
+        // Fractional statuses never become httpStatus; integers under 100 or
+        // over 599 are ignored too.
+        connection.observe(&event("main", json!(99)));
+        connection.observe(&event("main", json!(600)));
+        connection.observe(&event("main", json!(201)));
+        assert!(connection.http_status.is_none());
+        connection.main_frame = "child".to_string();
+        connection.observe(&event("child", json!(404)));
+        assert_eq!(connection.http_status, Some(404));
+        // Subframe responses never overwrite the document.
+        connection.observe(&event("main", json!(500)));
+        assert_eq!(connection.http_status, Some(404));
+    }
+
+    #[test]
+    fn extraction_validation_catches_malformed_payloads() {
+        let request = PageRequest {
+            url: "https://example.com".to_string(),
+            formats: vec!["markdown".to_string()],
+            only_main_content: true,
+            timeout: Duration::from_secs(1),
+            wait_for: Duration::ZERO,
+            wait_for_selector: String::new(),
+            wait_for_text: String::new(),
+        };
+        let mut missing = json!({"metadata": {"url": "https://example.com/"}});
+        assert!(validate_extraction(&mut missing, &request).is_err());
+
+        let mut good = json!({
+            "metadata": {"url": "https://example.com/"},
+            "markdown": "hello",
+            "warnings": [false],
+        });
+        let error = validate_extraction(&mut good, &request).unwrap_err();
+        assert_eq!(error.message(), "Malformed extraction warning");
+
+        let mut good = json!({
+            "metadata": {"url": "https://example.com/"},
+            "markdown": "hello",
+        });
+        validate_extraction(&mut good, &request).unwrap();
+        assert_eq!(good["metadata"]["sourceURL"], "https://example.com");
+        apply_http_status(&mut good, 503);
+        assert_eq!(good["metadata"]["httpStatus"], 503);
+        assert_eq!(good["warnings"][0]["code"], "http_error");
+    }
+}

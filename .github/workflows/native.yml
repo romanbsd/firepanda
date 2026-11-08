@@ -59,6 +59,8 @@ jobs:
       - run: cargo build --manifest-path rust/Cargo.toml --release
       - name: MCP protocol parity gate
         run: python3 tests/protocol.py rust/target/release/firepanda
+      - name: Adversarial CDP transport gate
+        run: python3 tests/transport.py rust/target/release/firepanda
   sanitizers:
     runs-on: ubuntu-latest
     timeout-minutes: 15

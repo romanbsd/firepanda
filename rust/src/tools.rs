@@ -5,9 +5,9 @@
 use crate::browser::{Browser, PageRequest};
 use crate::json::as_integer;
 use serde_json::{Value, json};
+use std::time::Duration;
 
 /// Frontier cap for crawl/map link discovery (M4).
-#[allow(dead_code)]
 pub const MAX_LINKS: usize = 10000;
 /// Serialization budget for crawl results (M4).
 #[allow(dead_code)]
@@ -411,8 +411,8 @@ pub fn parse_request(args: &Value, tool: Tool) -> Result<PageRequest, String> {
         url: normalize_url(url)?,
         formats: Vec::new(),
         only_main_content: parse_boolean(args, "onlyMainContent")?,
-        timeout_ms: parse_integer(args, "timeout")?,
-        wait_for_ms: parse_integer(args, "waitFor")?,
+        timeout: Duration::from_millis(parse_integer(args, "timeout")? as u64),
+        wait_for: Duration::from_millis(parse_integer(args, "waitFor")? as u64),
         wait_for_selector: parse_string(args, "waitForSelector")?,
         wait_for_text: parse_string(args, "waitForText")?,
     };
@@ -484,11 +484,11 @@ pub enum CallError {
     Tool(String),
 }
 
-pub fn execute(browser: &Browser, name: &str, args: &Value) -> Result<Value, CallError> {
+pub async fn execute(browser: &Browser, name: &str, args: &Value) -> Result<Value, CallError> {
     let tool = parse_tool(name).map_err(CallError::Invalid)?;
     let request = parse_request(args, tool).map_err(CallError::Invalid)?;
     if tool == Tool::Scrape {
-        return browser.scrape(&request).map_err(CallError::Tool);
+        return browser.scrape(&request).await.map_err(CallError::Tool);
     }
     // Validate the discovery-only bounds before anything reaches the browser.
     parse_integer(args, "limit").map_err(CallError::Invalid)?;
@@ -496,7 +496,7 @@ pub fn execute(browser: &Browser, name: &str, args: &Value) -> Result<Value, Cal
     parse_integer(args, "maxConcurrency").map_err(CallError::Invalid)?;
     // M4: BFS crawl/map pipeline lands here; today the first page dispatch
     // surfaces the same browser-start failure a sequential crawl would.
-    browser.scrape(&request).map_err(CallError::Tool)
+    browser.scrape(&request).await.map_err(CallError::Tool)
 }
 
 /// Byte budget for one crawl page; mirrors `serialized_size_within`.
