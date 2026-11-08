@@ -1,7 +1,6 @@
 //! Browser handle: managed Lightpanda child, CDP connection pool, idle
-//! shutdown. Ported from `src/browser.cpp`: process state stays behind one
-//! async mutex (the C++ code restricted it to the main thread), free
-//! connections are shared with page workers (M4).
+//! shutdown. Process state stays behind one async mutex; free connections are
+//! shared with page workers.
 
 mod cdp;
 

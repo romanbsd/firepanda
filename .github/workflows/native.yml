@@ -1,4 +1,4 @@
-name: Native MCP
+name: CI
 on: [push, pull_request, workflow_dispatch]
 permissions:
   contents: read
@@ -6,67 +6,7 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
-  native:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with:
-          python-version: '3.13'
-      - run: python3 scripts/install-lightpanda.py --release 1.0.2
-      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DFIREPANDA_TEST_LIGHTPANDA="$PWD/.local/bin/lightpanda"
-      - run: cmake --build build --parallel 2
-      - run: ctest --test-dir build --output-on-failure
-      - name: Verify installation and release packaging
-        run: |
-          cmake --install build --prefix "$PWD/install-check"
-          python3 scripts/package-release.py --binary build/firepanda --output "$PWD/dist-check"
-          test -f "$PWD/install-check/share/licenses/firepanda/LICENSE"
-          test -f "$PWD/dist-check/firepanda-"*.tar.gz
-  formatting:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with:
-          python-version: '3.13'
-      - run: python -m pip install clang-format==23.1.5
-      - run: clang-format --dry-run --Werror src/*.cpp src/*.hpp tests/json.cpp
   rust:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with:
-          python-version: '3.13'
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-      - run: cargo fmt --manifest-path rust/Cargo.toml --check
-      - run: cargo clippy --manifest-path rust/Cargo.toml --release --all-targets -- -D warnings
-      - run: cargo test --manifest-path rust/Cargo.toml --release
-      - run: cargo build --manifest-path rust/Cargo.toml --release
-      - name: MCP protocol parity gate
-        run: python3 tests/protocol.py rust/target/release/firepanda
-      - name: Adversarial CDP transport gate
-        run: python3 tests/transport.py rust/target/release/firepanda
-      - run: python3 scripts/install-lightpanda.py --release 1.0.2
-      - name: Native integration parity gate
-        run: python3 tests/integration.py rust/target/release/firepanda "$PWD/.local/bin/lightpanda"
-      - name: Memory and descriptor hygiene gate
-        run: python3 tests/memory.py rust/target/release/firepanda "$PWD/.local/bin/lightpanda"
-  rust-search:
     strategy:
       fail-fast: false
       matrix:
@@ -82,6 +22,37 @@ jobs:
         with:
           components: rustfmt, clippy
       - run: cargo fmt --manifest-path rust/Cargo.toml --check
+      - run: cargo clippy --manifest-path rust/Cargo.toml --release --all-targets -- -D warnings
+      - run: cargo test --manifest-path rust/Cargo.toml --release
+      - run: cargo build --manifest-path rust/Cargo.toml --release
+      - name: MCP protocol gate
+        run: python3 tests/protocol.py rust/target/release/firepanda
+      - name: Adversarial CDP transport gate
+        run: python3 tests/transport.py rust/target/release/firepanda
+      - run: python3 scripts/install-lightpanda.py --release 1.0.2
+      - name: Native integration gate
+        run: python3 tests/integration.py rust/target/release/firepanda "$PWD/.local/bin/lightpanda"
+      - name: Memory and descriptor hygiene gate
+        run: python3 tests/memory.py rust/target/release/firepanda "$PWD/.local/bin/lightpanda"
+      - name: Verify release packaging
+        run: |
+          python3 scripts/package-release.py --binary rust/target/release/firepanda --output "$PWD/dist-check"
+          test -f "$PWD/dist-check/firepanda-"*.tar.gz
+  rust-search:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
       - name: Clippy with the search feature
         run: >-
           cargo clippy --manifest-path rust/Cargo.toml --release --all-targets
@@ -98,32 +69,3 @@ jobs:
         run: >-
           python3 tests/search.py rust/target-search/release/firepanda
           "$PWD/.local/bin/lightpanda"
-  sanitizers:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    env:
-      ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
-      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with:
-          python-version: '3.13'
-      - run: python3 scripts/install-lightpanda.py --release 1.0.2
-      - run: cmake -S . -B build-sanitize -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_BUILD_TYPE=Debug -DFIREPANDA_SANITIZERS=ON -DFIREPANDA_TEST_LIGHTPANDA="$PWD/.local/bin/lightpanda"
-      - run: cmake --build build-sanitize --parallel 2
-      - run: ctest --test-dir build-sanitize --output-on-failure
-  tsan:
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    env:
-      TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with:
-          python-version: '3.13'
-      - run: python3 scripts/install-lightpanda.py --release 1.0.2
-      - run: cmake -S . -B build-tsan -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_BUILD_TYPE=Debug -DFIREPANDA_TSAN=ON -DFIREPANDA_TEST_LIGHTPANDA="$PWD/.local/bin/lightpanda"
-      - run: cmake --build build-tsan --parallel 2
-      - run: ctest --test-dir build-tsan --output-on-failure

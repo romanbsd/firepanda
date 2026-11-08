@@ -1,46 +1,47 @@
 # Firepanda
 
-A small C++20 [MCP](https://modelcontextprotocol.io/) service for scraping,
-crawling, and discovering links with native [Lightpanda](https://lightpanda.io/).
-Runs locally on macOS and Linux, without Docker, Node, Chromium, or libcurl.
+A small Rust [MCP](https://modelcontextprotocol.io/) service for scraping,
+crawling, discovering links, and searching the web with native
+[Lightpanda](https://lightpanda.io/). Runs locally on macOS and Linux, without
+Docker, Node, Chromium, or libcurl.
 
-Firepanda exposes three tools over stdio and talks directly to Lightpanda over a
-persistent CDP WebSocket on a private Unix-domain socket. Lightpanda starts lazily,
-is reused across requests, and stops after 60 seconds of inactivity.
+Firepanda exposes three browser tools over stdio and talks directly to Lightpanda
+over a persistent CDP WebSocket on a private Unix-domain socket. Lightpanda starts
+lazily, is reused across requests, and stops after 60 seconds of inactivity.
 
 - **scrape**: rendered Markdown, text, cleaned HTML, raw HTML, and links.
 - **crawl**: bounded, breadth-first traversal of same-origin pages.
 - **map**: anchor-link discovery, including external links without following them.
+- **search** (feature-gated): keyless web search through DuckDuckGo and Brave,
+  using browser-impersonated HTTP requests instead of a browser or an API key.
 
-This is a focused scraping service. It does not provide screenshots, search,
-LLM extraction, or full Firecrawl API compatibility. Websites requiring browser
-APIs Lightpanda does not implement may need a full browser instead.
+This is a focused scraping service. It does not provide screenshots, LLM
+extraction, or full Firecrawl API compatibility. Websites requiring browser APIs
+Lightpanda does not implement may need a full browser instead.
 
 ## Build and run
 
-Requirements: a C++20 compiler, CMake 3.24+, Git, and native Lightpanda.
-Python 3.11+ is needed for the installer, tests, and benchmarks, but not to run the
-compiled service. macOS and Linux are supported; Windows is not supported.
+Requirements: Rust 1.85+ (edition 2024), Git, and native Lightpanda. Python 3.11+
+is needed for the installer, tests, and benchmarks, but not to run the compiled
+service. macOS and Linux are supported; Windows is not.
 
 From a checkout of this repository:
 
 ```sh
 python3 scripts/install-lightpanda.py --release 1.0.2
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
-  -DFIREPANDA_TEST_LIGHTPANDA="$PWD/.local/bin/lightpanda"
-cmake --build build --parallel 2
-ctest --test-dir build --output-on-failure
-./build/firepanda --lightpanda "$PWD/.local/bin/lightpanda"
+cargo build --manifest-path rust/Cargo.toml --release --features search
+./rust/target/release/firepanda --lightpanda "$PWD/.local/bin/lightpanda"
 ```
+
+Omit `--features search` for the parity build, which advertises exactly the three
+browser tools. `make release` is the same command; `make build` is the parity
+build. `make gates` runs the browser-dependent suites against the parity binary,
+and `make search-gates` runs the offline search suite against a separate
+`rust/target-search` build so the parity binary is never overwritten.
 
 The last command waits for MCP JSON-RPC messages on stdin. Stdout is reserved for
 protocol replies; diagnostics go to stderr. It does not open an HTTP port.
 Close stdin or send SIGTERM/SIGINT to shut down and clean up the managed browser.
-
-CMake fetches the release tags selected in [CMakeLists.txt](CMakeLists.txt):
-cpp-httplib v0.64.0 and nlohmann/json v3.12.0. Git tags are readable version pins,
-but upstream can move them. Offline builds can supply local source directories
-with `FETCHCONTENT_SOURCE_DIR_HTTPLIB` and `FETCHCONTENT_SOURCE_DIR_JSON`.
 
 The Lightpanda installer supports macOS/Linux on arm64 and x86_64, verifies the
 upstream asset's SHA-256 digest, and writes a manifest beside the binary as
@@ -51,13 +52,13 @@ You can also supply an existing Lightpanda binary with `--lightpanda`.
 To install Firepanda under a user-owned prefix:
 
 ```sh
-cmake --install build --prefix "$HOME/.local"
+make install PREFIX="$HOME/.local"
 "$HOME/.local/bin/firepanda" --version
 ```
 
-Release archives, when published, contain the binary, documentation, and license.
-Lightpanda is installed separately. After extracting an archive and
-entering its directory, use the included installer and prebuilt executable:
+Release archives contain the binary, documentation, and license. Lightpanda is
+installed separately. After extracting an archive and entering its directory, use
+the included installer and prebuilt executable:
 
 ```sh
 python3 scripts/install-lightpanda.py --release 1.0.2
@@ -66,7 +67,7 @@ python3 scripts/install-lightpanda.py --release 1.0.2
 
 The installer chooses `.local/bin/lightpanda` beside the extracted `scripts/`
 directory. Verify the archive's `.sha256` before extraction using `shasum -a 256 -c`
-on macOS or `sha256sum -c` on Linux. CMake/test/benchmark commands require a source
+on macOS or `sha256sum -c` on Linux. Test and benchmark commands require a source
 checkout. See [release maintenance](docs/releasing.md).
 
 ## Connect an MCP client
@@ -77,7 +78,7 @@ Replace the two example paths with absolute paths on your machine:
 {
   "mcpServers": {
     "firepanda": {
-      "command": "/absolute/path/to/firepanda/build/firepanda",
+      "command": "/absolute/path/to/firepanda/rust/target/release/firepanda",
       "args": ["--lightpanda", "/absolute/path/to/firepanda/.local/bin/lightpanda"]
     }
   }
@@ -92,7 +93,7 @@ Lightpanda; the first browser request does.
 For a direct protocol smoke test:
 
 ```sh
-./build/firepanda --lightpanda "$PWD/.local/bin/lightpanda" <<'JSONRPC'
+./rust/target/release/firepanda --lightpanda "$PWD/.local/bin/lightpanda" <<'JSONRPC'
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}}
 {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"scrape","arguments":{"url":"https://example.com","formats":["markdown","links"]}}}
 JSONRPC
@@ -126,6 +127,12 @@ Discover links using `map`:
 {"url":"https://example.com","limit":5,"maxDepth":1}
 ```
 
+Search the web without an API key using `search` (search-enabled build):
+
+```json
+{"query":"lightpanda headless browser","limit":5}
+```
+
 ### Arguments
 
 | Argument | Default | Behavior |
@@ -139,6 +146,16 @@ Discover links using `map`:
 | `waitForText` | Unset | Nonempty, literal, case-sensitive body text, at most 4096 UTF-8 bytes; excludes scripts/styles/templates |
 | `limit` | `10` | Crawl/map only: 1–100 navigation attempts |
 | `maxDepth` | `1` | Crawl/map only: 0–5; the starting page has depth 0 |
+| `maxConcurrency` | `4` | Crawl/map only: 1–16 pages fetched at once |
+
+Search takes its own arguments:
+
+| Argument | Default | Behavior |
+| --- | --- | --- |
+| `query` | Required | Nonempty query, at most 512 UTF-8 bytes |
+| `limit` | `5` | 1–20 results |
+| `engine` | `auto` | `auto`, `duckduckgo`, or `brave`; `auto` falls back to the next engine on failure or no results |
+| `timeout` | `15000` | Total search budget, 1000–60000 ms; shared by every engine attempt |
 
 Both readiness conditions must hold when supplied together. They run after
 `waitFor`, share the page deadline, and apply to every page of a crawl/map.
@@ -151,6 +168,9 @@ iframe documents, shadow trees, or canvas pixels. There is no network-idle heuri
 `description`, and `httpStatus` when observed). Links have `{url, title}` records.
 `crawl` returns `pages`, `attempted`, `errors`, and `truncated`.
 `map` returns `links`, `attempted`, `errors`, and `truncated`.
+`search` returns Firecrawl v2-shaped data: `{"success": true, "data": {"web":
+[{"title", "description", "url"}]}}`, deduplicated by normalized URL in engine
+order.
 
 Crawls stay on the initial origin (scheme, host, and port). External redirects
 may be returned, but their destinations are not expanded. Final destination URLs
@@ -171,8 +191,14 @@ is omitted; iframe responses do not establish main-document status. Crawl pages
 retain warnings; map exposes them as `warnings: [{url, warnings: [...]}]`.
 
 Invalid arguments are JSON-RPC errors. Browser/extraction failures are MCP tool
-errors; crawl/map also report per-page errors. Use readiness conditions for content
-that loads after the initial page-load event. Firepanda does not bypass access controls.
+errors; crawl/map also report per-page errors, and search reports engine/network
+failures as tool errors. Use readiness conditions for content that loads after the
+initial page-load event. Firepanda does not bypass access controls.
+
+Search is keyless and local: requests use primp browser impersonation to the
+DuckDuckGo HTML endpoint (Brave as fallback). Engine availability depends on the
+network and can change; the offline fixture suite pins parsing and fallback
+behavior without contacting either engine.
 
 ## Browser lifecycle and design
 
@@ -180,17 +206,22 @@ that loads after the initial page-load event. Firepanda does not bypass access c
 MCP client ── stdin/stdout ── Firepanda ── CDP WebSocket / Unix socket ── Lightpanda
 ```
 
-- One serialized request stream, one reusable browser connection, and a fresh
+- One serialized request stream, one reusable browser connection pool, and a fresh
   browser context per page isolate cookies and page state between operations.
 - A managed browser uses a private temporary directory (0700) and socket (0600).
   No TCP discovery endpoint, local proxy, or heartbeat thread is needed.
 - Extraction runs in the page and returns only requested formats. Link-only and
   raw-HTML-only calls skip DOM cloning. Text-readiness scans are cached until DOM
   mutations invalidate them; selector state is still polled.
-- A deadline worker exists during active page work to enforce a total deadline
-  even if a peer continuously sends WebSocket control frames or fragments.
+- Every CDP read and write is deadline-bounded with `select!` on the cancellation-safe
+  stream, so a peer that keeps sending control frames or fragments cannot extend a
+  page past its deadline. Ping frames are answered inline.
+- Crawl/map use a bounded dispatch window: pages are dispatched in frontier order
+  and consumed oldest-first, preserving sequential breadth-first output. A failed
+  page drains its in-flight siblings (keeping their results), then reaps and
+  relaunches the managed browser before continuing.
 - Failure, idle expiry, EOF, and orderly shutdown share owned-resource cleanup.
-  Failed CDP streams are discarded so late responses cannot contaminate later calls.
+  Failed CDP connections are discarded so late responses cannot contaminate later calls.
 
 The default browser idle timeout is 60 seconds after completed browser work.
 Pings and tool discovery do not renew it; active requests are protected. The next
@@ -203,7 +234,7 @@ Attach to a browser you manage yourself:
 mkdir -m 700 /tmp/my-lightpanda
 lightpanda serve --unix-socket /tmp/my-lightpanda/cdp.sock
 # In another terminal:
-./build/firepanda --socket /tmp/my-lightpanda/cdp.sock
+./rust/target/release/firepanda --socket /tmp/my-lightpanda/cdp.sock
 ```
 
 The socket path must be absolute and at most 100 bytes. Firepanda closes its own
@@ -225,6 +256,7 @@ See [design details](docs/native-design.md) for code structure and protocol beha
 | Crawl/map total work | 120 seconds |
 | Crawl/map traversal | 100 attempts, depth 5 maximum |
 | Unique discovery/frontier links | 10000 |
+| Search results | 20 per call; 60-second budget maximum |
 
 Exactly reaching a link cap without omitting anything is complete. Dropped links
 set `linksTruncated` on scrape output and propagate `truncated` to crawl/map.
@@ -235,29 +267,30 @@ The Markdown renderer handles common article elements rather than all HTML seman
 Measurements are local synthetic workloads, not comparisons with Firecrawl,
 Chromium, or TCP transport. They do not predict public-site throughput.
 
-| Workload | Before | After | Scope |
-| --- | --- | --- | --- |
-| Unchanged text readiness, 1-second wait | 20 scans / 65.62 ms CPU | 1 scan / 3.09 ms CPU | Stable Lightpanda 1.0.2, macOS arm64; instrumented extraction |
-| Rejecting a 9 MiB JSON page at a 4 MiB cap, 100 iterations | ~1501 ms | ~662 ms | Release C++ microbenchmark; bounded counting versus `dump().size()` |
+Five-iteration warm medians from `scripts/benchmark.py` on macOS arm64 with stable
+Lightpanda 1.0.2 and local HTTP fixtures:
 
-These A/B numbers were recorded during development on 2026-11-05. Readiness
-numbers measure scanning CPU, not the one-second wait. The JSON optimization
-avoids allocating a full serialized page solely to count it. Whole-service A/B
-measurements varied enough that no general throughput improvement is claimed.
+| Workload | Rust | Historical C++ build |
+| --- | --- | --- |
+| Cold launch + first scrape | 28.8 ms | 34.5 ms |
+| Warm small page | 1.7 ms | 1.8 ms |
+| 256 KiB page | 3.8 ms | 4.9 ms |
+| 3000-paragraph article | 26.0 ms | 27.4 ms |
+| 10000 links | 37.6 ms | 138.5 ms |
+| Delayed JavaScript text | 309.2 ms | 308.7 ms |
+| Crawl of 51 pages, `maxConcurrency=1` | 142.5 ms | 252.9 ms |
+| Crawl of 51 pages, `maxConcurrency=4` | 90.2 ms | 199.3 ms |
 
-A fresh tagged Release build measured approximately
-2.6 ms for a warm small page,
-6.1 ms for 256 KiB Markdown,
-and 142.8 ms for 10000 links (20 local-fixture samples per case).
-The executable was about 527 KiB, excluding Lightpanda.
-[Full results and environment](docs/benchmarks.md#current-tagged-build) are retained.
+The crawl numbers show the dispatch window doing useful work: 1.58× speedup at
+concurrency 4 versus 1.27× for the earlier threading implementation. The C++
+column is retained only as a reference point; that implementation no longer
+exists in this repository.
 
 Reproduce current service wall-time measurements from a source checkout:
 
 ```sh
-python3 scripts/benchmark.py --binary build/firepanda \
-  --lightpanda .local/bin/lightpanda --iterations 20 --output build/benchmark.json
-./build/json_test --benchmark
+python3 scripts/benchmark.py --binary rust/target/release/firepanda \
+  --lightpanda .local/bin/lightpanda --iterations 20 --output dist/benchmark.json
 ```
 
 The Python benchmark uses local HTTP fixtures, reports cold launch separately,
@@ -266,43 +299,32 @@ and delayed JavaScript content. See [methodology and retained data](docs/benchma
 
 ## Development and validation
 
-CTest includes protocol/CLI contracts, offline dependency-update and installer
-checks, adversarial CDP peers, native browser integration, JSON serialization
-boundaries, and 100-cycle memory stress. Local macOS runs passed normally and
-under ASan/UBSan/leak detection; the Linux workflows still need a remote run.
-Instrumentation covers Firepanda and its C++ dependencies, not the prebuilt
-Lightpanda binary. See [validation notes](docs/memory-validation.md).
+The black-box suites spawn the binary over stdio, so they run unchanged against
+any build:
 
 ```sh
-cmake --build build --target format        # requires clang-format
-cmake --build build --target format-check
-cmake -S . -B build-sanitize -DCMAKE_BUILD_TYPE=Debug \
-  -DFIREPANDA_SANITIZERS=ON \
-  -DFIREPANDA_TEST_LIGHTPANDA="$PWD/.local/bin/lightpanda"
-cmake --build build-sanitize --parallel 2
-ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 \
-UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
-  ctest --test-dir build-sanitize --output-on-failure
-
-cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug \
-  -DFIREPANDA_TSAN=ON \
-  -DFIREPANDA_TEST_LIGHTPANDA="$PWD/.local/bin/lightpanda"
-cmake --build build-tsan --parallel 2
-TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1 \
-  ctest --test-dir build-tsan --output-on-failure
+make check          # cargo fmt --check + clippy for both feature sets
+make test           # cargo test for both feature sets
+make gates          # protocol, transport, integration, memory (needs Lightpanda)
+make search-gates   # offline search fixtures, separate target directory
 ```
 
-On macOS, use Homebrew LLVM if Apple's sanitizer runtime lacks leak detection;
-pass `-DCMAKE_CXX_COMPILER="$(brew --prefix llvm)/bin/clang++"` when creating the
-sanitizer build. ThreadSanitizer works with the system Clang on Apple silicon. The
-sanitizer and ThreadSanitizer builds are mutually exclusive. The regular macOS
-build also supports the `memory-check` target using the system `leaks` tool.
+`tests/protocol.py` covers modern/legacy wire behavior, malformed requests,
+argument validation, notifications, and missing-browser errors.
+`tests/transport.py` uses adversarial Unix-socket CDP peers for pings, fragments,
+malformed replies, reconnection, and SIGTERM during reads.
+`tests/integration.py` drives a real Lightpanda child and a local HTTP fixture:
+JavaScript rendering, all formats, crawl/map ordering and concurrency, failure
+recovery, browser reuse, socket permissions, external-browser ownership, EOF
+cleanup, and SIGTERM teardown.
+`tests/memory.py` repeats 100 browsing cycles with large outputs and failure
+recovery, and checks descriptor hygiene.
+`tests/search.py` serves canned DuckDuckGo/Brave HTML locally and pins redirect
+decoding, ad filtering, deduplication, limits, fallback, and validation without
+network access.
 
-CI runs macOS/Linux builds, Linux sanitizers and ThreadSanitizer, and C++ formatting.
-A weekly/manual
-[dependency workflow](.github/workflows/bump-fetchcontent.yml) updates FetchContent
-release tags, tests the candidate, and opens a pull request. No automatic merge is
-performed. See [contributing and release maintenance](docs/releasing.md).
+CI runs the parity suite on macOS and Linux, the search feature suite separately,
+and verifies release packaging. See [contributing and release maintenance](docs/releasing.md).
 
 ## Security and licensing
 
@@ -311,5 +333,5 @@ JavaScript in Lightpanda and can access whatever network that process can reach;
 a private control socket is not network isolation. Use appropriate egress controls
 when browsing untrusted URLs or exposing tools to other users.
 
-Firepanda is [MIT licensed](LICENSE). Its C++ dependencies are MIT licensed.
-Lightpanda is downloaded separately under its own upstream license.
+Firepanda is [MIT licensed](LICENSE). Rust dependencies are MIT/Apache-2.0
+licensed, and Lightpanda is downloaded separately under its own upstream license.

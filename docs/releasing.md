@@ -2,76 +2,62 @@
 
 ## Before opening a pull request
 
-Build from a clean directory with the selected dependency tags, run the full
-CTest suite with native Lightpanda, and check C++ formatting. Browser-dependent
-tests require `FIREPANDA_TEST_LIGHTPANDA`; without it only offline/protocol tests run.
-For ownership, transport, or memory changes, also run the sanitizer configuration
-from the README. For concurrency changes, run the ThreadSanitizer configuration
-too. Describe any validation that could not be run.
+Run the formatting/lint/test targets for both feature sets, then the browser gates
+with a native Lightpanda build:
+
+```sh
+make check
+make test
+python3 scripts/install-lightpanda.py --release 1.0.2
+make gates           # parity binary: protocol, transport, integration, memory
+make search-gates    # search-feature binary: offline engine fixtures
+```
+
+`make gates` uses `.local/bin/lightpanda` by default; override with
+`make gates LIGHTPANDA=/path/to/lightpanda`. Without Lightpanda, run the offline
+suites directly (`tests/protocol.py`, `tests/transport.py`, `tests/search.py`) and
+say which browser-dependent checks could not run.
 
 ## Dependency updates
 
-The weekly Monday 06:00 UTC/manual `Bump FetchContent tags` workflow follows the
-same mechanism as mnemon-cpp: a Python standard-library script finds the latest
-GitHub release tag (or falls back to a version tag), updates `GIT_TAG` declarations,
-and `peter-evans/create-pull-request` opens/updates `bump-fetchcontent-tags`.
-Only cpp-httplib and nlohmann/json are managed. No automatic merge is enabled.
+Dependencies are pinned in `rust/Cargo.lock`. Update deliberately:
 
 ```sh
-python3 tests/dependency_updates.py
-python3 scripts/bump_fetchcontent_tags.py
+cargo update --manifest-path rust/Cargo.toml
+cargo test --manifest-path rust/Cargo.toml --release
+cargo test --manifest-path rust/Cargo.toml --release --features search
 ```
 
-The second command contacts GitHub and writes CMakeLists.txt when tags change.
-Set `GITHUB_TOKEN` to avoid anonymous API limits. Malformed tags or missing
-releases fail before any file is written. Tags are readable upstream version
-references, not immutable hashes. Review API changes and license notices.
-
-In repository Settings → Actions → General, enable GitHub Actions to create pull
-requests and allow the workflow's contents/pull-request write permissions.
-GitHub documents that PR workflows created using GITHUB_TOKEN enter an
-approval-required state, while token-created push events do not trigger new runs.
-This workflow therefore builds and runs all tests before creating the PR. See
-[GitHub workflow-trigger rules](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow).
-Maintainers should still run required macOS/sanitizer checks before merging.
-Workflow changes from pull requests run with read-only repository permissions.
+Review the lockfile diff and upstream license/API changes. New runtime
+dependencies should keep the binary small; search-only crates stay behind the
+`search` feature. There is no automated dependency-bump workflow.
 
 ## Prepare a release
 
-1. Set the version in `project(firepanda VERSION ...)` in CMakeLists.txt. CLI and
-   MCP identity derive from it. Update the README if needed.
-2. Run a clean Release build, CTest with Lightpanda 1.0.2, sanitizer and
-   ThreadSanitizer tests, and formatting. Run the Linux/macOS workflows; local
-   macOS results do not establish remote Linux success.
-3. Inspect the files to publish. Local MCP configuration, build outputs,
-   downloaded browsers, and review evidence should stay outside source/release archives.
-4. Commit the reviewed source, create a matching `vMAJOR.MINOR.PATCH` tag, and push
-   it when ready. The `Release` workflow builds/tests on Ubuntu 24.04 and macOS 15,
-   rejects a tag/version mismatch, and creates a **draft** GitHub release.
-5. Inspect the archive contents, checksums, platform architectures, and workflow
-   results, then publish the draft when ready. Archives are unsigned; checksums
-   detect transfer corruption but do not provide independent publisher identity.
-
-The workflows are prepared configuration; they do not create a remote repository,
-set repository visibility, or publish anything until explicitly run/tagged.
-There is no hardcoded GitHub owner or repository URL to change before first push.
+1. Bump `version` in `rust/Cargo.toml` (and refresh `Cargo.lock`).
+2. Run `make check`, `make test`, `make gates`, and `make search-gates`.
+3. Confirm the release build reports the new version:
+   `cargo build --manifest-path rust/Cargo.toml --release --features search &&
+   rust/target/release/firepanda --version`.
+4. Tag `vVERSION` and push. The Release workflow builds and tests the tagged
+   tree on macOS and Ubuntu, packages archives, and creates a draft release.
 
 ## Package locally
 
 From a tested source build:
 
 ```sh
-python3 scripts/package-release.py --binary build/firepanda --tag v0.2.0
+python3 scripts/package-release.py --binary rust/target/release/firepanda --tag v0.2.0
 ```
 
 The script writes `dist/firepanda-VERSION-OS-ARCH.tar.gz` and an accompanying
 `.sha256`. The archive includes `bin/firepanda`, README, docs, the Lightpanda
-installer, and Firepanda's MIT license. It does
-not bundle Lightpanda, local configuration, build caches, or review artifacts.
-Architecture is detected from the native runner; these are not universal macOS
-binaries or cross-compiled Linux binaries. Ubuntu-built binaries depend on the
-runner's libc/toolchain and may need rebuilding for older distributions.
+installer, and Firepanda's MIT license. It does not bundle Lightpanda, local
+configuration, build caches, or review artifacts. Architecture is detected from
+the native runner; these are not universal macOS binaries or cross-compiled Linux
+binaries. Ubuntu-built binaries depend on the runner's libc/toolchain and may need
+rebuilding for older distributions.
 
 After extracting an archive, install Lightpanda using the included installer and
 point an MCP client at `bin/firepanda`. Build/test/benchmark instructions in the
-README that refer to CMake or tests require a source checkout.
+README require a source checkout.

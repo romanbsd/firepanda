@@ -1,6 +1,6 @@
 //! JSON-RPC MCP server: framing contract, protocol negotiation, and method
-//! dispatch. Ported from `src/main.cpp` `Server` — validation order, error
-//! codes, and legacy/modern negotiation are pinned by `tests/protocol.py`.
+//! dispatch. Validation order, error codes, and legacy/modern negotiation are
+//! pinned by `tests/protocol.py`.
 
 use crate::browser::{Browser, Options, Stop};
 use crate::tools::{self, CallError};

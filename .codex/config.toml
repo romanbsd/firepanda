@@ -1,3 +1,3 @@
 [mcp_servers.firepanda]
-command = "./build/firepanda"
+command = "./rust/target/release/firepanda"
 args = ["--lightpanda", "/opt/homebrew/bin/lightpanda"]

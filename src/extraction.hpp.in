@@ -1,3 +1,0 @@
-#pragma once
-#include <string_view>
-inline constexpr std::string_view extraction_js = R"FIREPANDA(@FIREPANDA_EXTRACTION_JS@)FIREPANDA";

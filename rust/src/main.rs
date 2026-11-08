@@ -1,5 +1,5 @@
 //! firepanda: MCP over stdio with a managed Lightpanda browser.
-//! Ported from `src/main.cpp`; milestone gates in docs/rust-migration-plan.md.
+//! Milestone gates live in docs/rust-migration-plan.md.
 
 mod browser;
 mod cli;

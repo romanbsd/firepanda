@@ -14,22 +14,27 @@ jobs:
       matrix:
         os: [ubuntu-24.04, macos-15]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: '3.13'
+      - uses: dtolnay/rust-toolchain@stable
       - name: Build and test
         run: |
+          cargo build --manifest-path rust/Cargo.toml --release --features search
+          cargo test --manifest-path rust/Cargo.toml --release --features search
           python3 scripts/install-lightpanda.py --release 1.0.2
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DFIREPANDA_TEST_LIGHTPANDA="$PWD/.local/bin/lightpanda"
-          cmake --build build --parallel 2
-          ctest --test-dir build --output-on-failure
+          python3 tests/protocol.py rust/target/release/firepanda
+          python3 tests/transport.py rust/target/release/firepanda
+          python3 tests/integration.py rust/target/release/firepanda "$PWD/.local/bin/lightpanda"
+          python3 tests/memory.py rust/target/release/firepanda "$PWD/.local/bin/lightpanda"
+          python3 tests/search.py rust/target/release/firepanda "$PWD/.local/bin/lightpanda"
       - name: Package binary, licenses and checksums
         env:
           RELEASE_TAG: ${{ github.ref_name }}
-        run: python3 scripts/package-release.py --binary build/firepanda --tag "$RELEASE_TAG"
+        run: python3 scripts/package-release.py --binary rust/target/release/firepanda --tag "$RELEASE_TAG"
       - uses: actions/upload-artifact@v7
         with:
           name: release-${{ matrix.os }}

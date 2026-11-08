@@ -1,6 +1,6 @@
 //! One CDP connection: deadline-bounded reads, command round-trips, and the
-//! per-page scrape pipeline. Ported from `Connection`/`run_scrape` in
-//! `src/browser.cpp`; `tests/transport.py` pins the adversarial behavior.
+//! per-page scrape pipeline. `tests/transport.py` pins the adversarial
+//! behavior.
 
 use super::{PageRequest, Stop};
 use crate::json::{ParseError, check_depth};
@@ -12,7 +12,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 /// In-page extractor, embedded verbatim from the C++ build (the C++ binary
 /// embeds it through extraction.hpp.in).
-const EXTRACTION_JS: &str = include_str!("../../../src/extract.js");
+const EXTRACTION_JS: &str = include_str!("extract.js");
 
 const STOPPING: &str = "Service is stopping";
 const STOPPED: &str = "Lightpanda operation timed out or service is stopping";

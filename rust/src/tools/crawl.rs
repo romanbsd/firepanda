@@ -1,7 +1,7 @@
-//! BFS crawl/map with bounded concurrency. Ported from `execute` in
-//! `src/tools.cpp`: the dispatch loop fills the window in frontier order and
-//! consumes results oldest-first, so pages, links, and errors keep sequential
-//! breadth-first order even though fetches overlap. A failed page drains its
+//! BFS crawl/map with bounded concurrency. The dispatch loop fills the window
+//! in frontier order and consumes results oldest-first, so pages, links, and
+//! errors keep sequential breadth-first order even though fetches overlap. A
+//! failed page drains its
 //! siblings (keeping their results) before the browser is reaped and
 //! relaunched.
 

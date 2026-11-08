@@ -1,6 +1,6 @@
-//! Bounded JSON input. Mirrors `src/json.hpp`: byte limits alone do not bound
-//! recursion, so parsing is guarded by the same 64-level nesting cap before
-//! the data ever reaches the deserializer.
+//! Bounded JSON input. Byte limits alone do not bound recursion, so parsing is
+//! guarded by the same 64-level nesting cap before the data ever reaches the
+//! deserializer.
 
 pub const MAX_LINE_BYTES: usize = 1024 * 1024;
 
@@ -113,7 +113,7 @@ mod tests {
         assert!(parse_line(b"").is_err());
     }
 
-    /// Port of `tests/json.cpp`: every limit boundary around the exact
+    /// Port of the historical JSON size-boundary suite: every limit boundary around the exact
     /// serialized size, for the same value zoo the C++ suite walks.
     fn check(value: serde_json::Value) {
         let expected = serde_json::to_string(&value).unwrap().len();

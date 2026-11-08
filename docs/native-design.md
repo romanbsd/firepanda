@@ -1,7 +1,8 @@
 # Native service decisions
 
-The native program is a C++20 MCP stdio service for macOS and Linux. Its three
-tools are `scrape`, `crawl`, and `map`. The executable does not invoke Node, Docker, or an intermediate HTTP API.
+Firepanda is a Rust (edition 2024, Tokio) MCP stdio service for macOS and Linux.
+Its tools are `scrape`, `crawl`, `map`, and — in `--features search` builds —
+`search`. The executable does not invoke Node, Docker, or an intermediate HTTP API.
 
 ## Communication
 
@@ -10,106 +11,82 @@ tools are `scrape`, `crawl`, and `map`. The executable does not invoke Node, Doc
 Lightpanda's native `serve --unix-socket` interface supports CDP WebSockets at
 `/`. Firepanda connects directly, without HTTP endpoint discovery or a TCP port.
 The socket lives in a `mkdtemp` directory with mode 0700; Lightpanda creates the
-socket with mode 0600. Each MCP process owns one lazy browser child and a pool
-of CDP WebSocket connections. Lightpanda's MultiClient mode serves each
-connection with a dedicated OS thread and an isolated browser instance inside
-that single child, so concurrent page fetches never need a second process.
-`--socket` attaches to an independently managed browser instead.
-CDP replies and events share the connection that carried their command. Only
-bounded page-load and main-document status observations are retained for the
-active session; arbitrary event bodies are discarded immediately.
-cpp-httplib's blocking read timeout can restart while processing control frames
-or fragments. A deadline worker exists only while a page operation is active;
-it watches a duplicate descriptor registered only after connect() succeeds and
-shuts it down at the operation deadline or on a stop signal. The signal handler
-wakes it through a shared non-blocking self-pipe, and its destructor wakes it
-through a private one, so idle waiting costs no periodic wakeups and concurrent
-workers can never steal a sibling's teardown byte. The shared pipe still serves
-stop delivery: a sibling may drain the stop byte first, so each worker caps its
-poll timeout at 250 ms and re-checks the stop flag even after a missed
-wake-up. Owning the duplicate prevents descriptor reuse during retries from
-targeting another file.
-The worker is joined and its descriptor closed before the operation returns.
-The shutdown flag uses a lock-free atomic shared with the signal handler.
-While idle, the main thread uses `pselect` with an atomic signal-mask transition
-instead of checking a flag and then entering a separate blocking read. This
-closes the idle shutdown race without periodically waking to poll for signals.
+socket with mode 0600. Each MCP process owns at most one lazy browser child.
+SIGTERM, idle expiry, EOF, and failure paths share one cleanup routine: close the
+pooled connections, send SIGTERM, wait up to 500 ms, then SIGKILL and reap. It only
+signals the child PID it created; an external browser is never terminated.
 
-MCP requests execute serially, but a crawl or map fetches pages concurrently:
-the main thread fills a window of at most `maxConcurrency` pages by checking
-out pooled connections (launching the browser if needed), then consumes results
-in dispatch order. Consumption order equals sequential breadth-first order, so
-pages, links, and errors are identical to a serial crawl even though fetches
-overlap. Fetches run on a fixed pool of page workers sized to `maxConcurrency`
-and reused across pages, so a crawl creates threads once instead of one per
-page; each page's deadline guard stops before its connection returns to the
-pool. Each scrape still uses a fresh browser context, navigates once, waits
-for `Page.loadEventFired`, evaluates one projection of the DOM, then disposes
-the context. Requested formats alone cross the socket. Extra `waitFor` is
-available for scripts that continue after load. There is no claim of
-network-idle detection. Connection/process reuse is tested, but Unix-socket
-versus TCP speed has not been benchmarked; rendering and network requests can
-dominate either transport.
+## Module map
 
-Timeouts invalidate the CDP connection. Contexts use `disposeOnDetach`, so failed
-streams are disconnected without sending further cleanup commands. Managed browser failures also stop the
-child before the next operation can restart it. Inside a crawl, a failed page
-pauses dispatch, drains its in-flight siblings while keeping their successful
-results, then reaps the whole browser; the next page cold-starts a fresh child.
-EOF and SIGTERM/SIGINT initiate
-cleanup; only the child PID created by this process is signalled and reaped.
-An external browser is never terminated. SIGKILL cannot run cleanup.
-
-## Libraries researched
-
-| Library | Decision |
+| Path | Responsibility |
 | --- | --- |
-| [cpp-httplib](https://github.com/yhirose/cpp-httplib) | Selected. The selected release has WebSocket clients, UDS, host-to-socket mapping, bounded reads, and a single-header build. Heartbeat disabled to avoid an extra thread. TLS/compression disabled for the local CDP transport. Lightpanda handles HTTPS. Selected release tag: `v0.64.0`. |
-| [nlohmann/json](https://json.nlohmann.me/integration/cmake/) | Selected, version 3.12.0. Small integration surface, dynamic CDP/MCP messages, portable C++20 toolchain. Not chosen on a claim of fastest JSON parsing. |
-| [Boost.Beast](https://www.boost.org/doc/libs/latest/libs/beast/doc/html/beast/using_websocket.html) + [Asio](https://www.boost.org/doc/libs/latest/doc/html/boost_asio/overview/posix/local.html) | Capable alternative with async operations and generic socket streams. More build and API complexity than this single-connection blocking service needs. |
-| [Glaze](https://github.com/stephenberry/glaze) | Strong option for typed serialization. Dynamic protocol envelopes and broad AppleClang compatibility made nlohmann/json the simpler initial choice. No comparative performance benchmark was run. |
-| [libcurl WebSockets](https://curl.se/libcurl/c/libcurl-ws.html) | Excluded; the local transport does not need another HTTP stack. |
-| [mcp-cpp-sdk](https://www.yurirocha.com/mcp-cpp-sdk/getting-started.html) | Third-party SDK with Boost dependencies. This service implements its bounded stdio protocol surface directly instead of adding its transport stack. |
+| `rust/src/main.rs` | stdio loop: chunked reads, line assembly, idle select arm, EOF/SIGTERM exit |
+| `rust/src/cli.rs` | argv parsing and exit codes |
+| `rust/src/json.rs` | 64-level nesting check, bounded line parse, `serialized_size_within` |
+| `rust/src/mcp.rs` | JSON-RPC framing, modern/legacy negotiation, result wrapping and size caps |
+| `rust/src/tools.rs` | tool table, argument schema/validation, URL normalization, dispatch |
+| `rust/src/tools/crawl.rs` | bounded BFS crawl/map, ordering, failure drain |
+| `rust/src/browser/mod.rs` | process lifecycle, connection pool, idle bookkeeping, shutdown |
+| `rust/src/browser/cdp.rs` | deadline-bounded CDP connection, scrape pipeline, validation |
+| `rust/src/browser/extract.js` | in-page extractor (embedded with `include_str!`) |
+| `rust/src/search/mod.rs` | feature-gated keyless search (primp + scraper) |
 
-The cpp-httplib WebSocket API is present in the pinned commit; older packaged
-versions may not contain it. See its [WebSocket documentation](https://github.com/yhirose/cpp-httplib/blob/v0.64.0/README-websocket.md).
-CMake selects Git release tags with shallow clones. Tags can be moved upstream;
-these are version pins rather than immutable content hashes. Dependencies are
-header-only and do not require a package manager. `FETCHCONTENT_SOURCE_DIR_HTTPLIB` and
-`FETCHCONTENT_SOURCE_DIR_JSON` support pre-downloaded sources/offline builds.
+## Concurrency and lifecycle
+
+The C++ build used a self-pipe and a lock-free atomic shared with the signal
+handler. The Rust build uses a Tokio `watch` channel (`Stop`): the signal task
+publishes `true`, and every waiter — the stdio select loop, connect retries,
+deadline-bounded CDP reads/writes, and readiness sleeps — observes it through a
+receiver clone. There is no periodic wakeup and no extra descriptor.
+
+Process state (options, socket directory, child handle, idle timestamp) sits
+behind one async mutex. Free CDP connections sit in a second mutex; a page worker
+owns its connection for the duration of the scrape and returns it only on success.
+A failed page discards its connection and the crawl loop reaps the browser after
+draining siblings.
+
+Crawl/map dispatch fills a `maxConcurrency` window in frontier order and consumes
+results oldest-first. Fetches overlap, but pages, links, and errors keep sequential
+breadth-first order. Bounds match the previous implementation: 120-second crawl
+budget, 100 ms dispatch floor, `limit`/`maxDepth` caps, a 10000-link frontier, and
+a 4 MiB serialization budget that drops later pages without discarding siblings.
+
+Idle expiry counts from completed browser work (`page_completed`), not from
+dispatch. Tool discovery, pings, and notifications do not renew it. The idle
+select arm and `/dev/stdin` read share the same loop, so shutdown never races an
+in-flight request; the browser is restarted by the next browser request.
 
 ## MCP and bounds
 
-The service implements modern [2026-07-28 discovery](https://modelcontextprotocol.io/specification/2026-07-28/server/discover)
-and per-request protocol metadata, plus legacy `initialize` for revisions
-2024-11-05, 2025-03-26, 2025-06-18, and 2025-11-25. It exposes tools/list,
-tools/call, ping, and structured/text results. Notifications receive no reply.
-Unknown tools/invalid arguments are protocol errors; browser failures are tool
-errors. No sampling, elicitation, subscriptions, or tasks are advertised.
+Modern (`_meta`) and legacy initialize negotiation are handled in one dispatch
+path; unknown protocol versions return `-32022` with data, malformed lines return
+parse errors, and notifications never receive replies. Argument validation is a
+JSON-RPC error (`-32602`); browser or extraction failures are MCP tool results with
+`isError` and no `structuredContent`.
 
-Requests are limited to 1 MiB before parsing, JSON nesting to 64 levels,
-WebSocket messages to 16 MiB, and
-serialized tool data to 8 MiB (text and structured data duplicate that payload
-on the MCP wire up to 1 MiB; larger results omit structured data). Crawl limits
-are 100 pages, depth 5, 120 seconds total, 10,000 discovered links, 4 MiB of
-page data, and 16 pages in flight (4 by default, set per call with
-`maxConcurrency`). Limits return `truncated` and per-page
-errors. Calls execute serially; cancellation notifications do not interrupt a
-running call. Each page has a configurable deadline of at most 120 seconds.
+Input is capped at 1 MiB per line before parsing and 64 levels of JSON nesting on
+both MCP and CDP paths. WebSocket messages are capped at 16 MiB. Tool results are
+capped at 8 MiB; results above 1 MiB omit the duplicate structured field. Text and
+structured results are duplicated on the wire below that threshold for client
+compatibility. The link cap is defined once in `tools.rs` and passed into the
+extractor. Option definitions feed both validation and JSON schemas.
 
-The Markdown renderer supports common article elements, not complete HTML to
-CommonMark fidelity. Map discovers anchors by crawling; it does not read sitemaps
-or use a search provider. Discovered external links are reported but not queued.
-Redirects may leave the initial origin; their destination is not expanded.
-Final destination URLs are tracked so an already queued direct destination is
-skipped after a redirect reaches it. Unknown aliases still count as navigation
-attempts, but their already returned destinations are not emitted again.
-Browsing arbitrary URLs retains Lightpanda's normal network access.
+## Search (feature-gated)
 
-Lightpanda also has a [native MCP server](https://github.com/lightpanda-io/browser#native-mcp-and-skill).
-Users who only need its native tools can run `lightpanda mcp` directly. Firepanda
-adds the scoped scrape/map/crawl interface requested here; embedding Lightpanda
-as a C++ library is not an established upstream integration used by this project.
+`--features search` adds primp (browser impersonation) and scraper (CSS parsing) as
+optional dependencies so the parity build stays small and the browser gates never
+depend on network search. The recipes follow `ddgs`: DuckDuckGo's HTML endpoint via
+GET (its form POST is answered with a cookie challenge from non-browser clients),
+and Brave's `data-type="web"` result blocks. DuckDuckGo redirect wrappers
+(`/l/?uddg=...`) are decoded, ad redirects (`y.js`) are dropped, and results are
+deduplicated by normalized URL. `auto` tries DuckDuckGo, then Brave; network/HTTP
+failures and empty result sets fall through, all under one total timeout.
+
+The response is Firecrawl v2 shaped (`{"success": true, "data": {"web": [...]}}`).
+`FIREPANDA_SEARCH_DDG_URL` and `FIREPANDA_SEARCH_BRAVE_URL` override the engine
+endpoints; `tests/search.py` uses them to serve canned HTML locally, so parsing,
+fallback, and validation are tested offline. Live availability is an engine
+property, not a test gate.
 
 ## Validation
 
@@ -125,34 +102,21 @@ failure with child relaunch, external-browser ownership, EOF cleanup, and
 SIGTERM during navigation/post-load waits.
 `tests/transport.py` uses adversarial Unix-socket CDP peers to check continuous
 pings, fragmented messages, malformed replies, reconnection, and SIGTERM while
-reading a fragment stream. Exact and overflowing link caps are tested separately.
-`tests/memory.py` repeats 100 browsing cycles, large outputs, and failure recovery;
-it runs as part of CTest and can also wrap the regular binary in macOS `leaks`.
-CI is configured to run the suite on macOS and Linux, plus a Linux sanitizer job.
-A workflow definition does not establish that any remote job has run.
+reading a fragment stream.
+`tests/memory.py` repeats 100 browsing cycles, large outputs, and failure recovery
+and checks that the descriptor count is flat.
+`tests/search.py` covers the offline search fixtures.
+`cargo test` ports the JSON size-boundary suite and covers URL normalization,
+schemas, MCP negotiation, browser pool/ownership, and search parsing.
 
-## Current ownership and optimization details
+CI runs the default parity suite and the search suite on macOS and Linux. Release
+packaging is verified by running `scripts/package-release.py` on the built binary.
 
-The default managed-browser idle deadline is 60 seconds after completed browser
-work; `--idle-timeout 0` disables expiry. Failure, destructor, and idle cleanup use
-one resource-release path. External sockets/processes remain externally owned.
-The main thread waits with `pselect`, including the idle deadline.
+## Packaging
 
-The link cap is defined once in `src/browser.hpp` and passed into extraction.
-String and integer option definitions supply both validation and tool schemas.
-Frontier strings are owned by a set; queue pointers remain valid across rehash
-because keys are never erased. Crawl serialization budgets use the JSON library's
-serializer with a bounded counting stream instead of allocating another page string.
-Text readiness caches its result until child-list/character-data mutations invalidate
-it; selector conditions still poll because state changes need not mutate attributes.
-The observer is disconnected on success and timeout, and polling works without it.
-
-Large results transfer ownership through the pipeline. The selected JSON library
-can move rvalues through initializer lists as well as assignments; initializer lists
-should not be assumed to copy every moved value. Text and structured MCP results
-remain duplicated on the wire for client compatibility up to 1 MiB; larger
-results omit the structured field and carry the JSON text once.
-
-The CMake project version feeds CLI and MCP identity. Release packaging includes
-Firepanda, its MIT license, and documentation; Lightpanda is
-installed separately.
+The crate version (`rust/Cargo.toml`) feeds CLI and MCP identity. `make release`
+builds with search enabled; `make build` builds the three-tool parity binary.
+`make install` copies the binary and MIT license under a prefix.
+`scripts/package-release.py` builds `firepanda-VERSION-OS-ARCH.tar.gz` plus a
+SHA-256 file containing the binary, README, docs, and the Lightpanda installer.
+Lightpanda itself is installed separately.

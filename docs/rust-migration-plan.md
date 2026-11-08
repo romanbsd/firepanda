@@ -1,8 +1,12 @@
 # Rust Migration Plan — firepanda
 
+**Status (2026-11-08): M0–M8 complete on `rust-rewrite`.** The parity binary keeps the
+three original tools; `--features search` adds the fourth. The historical plan below is
+retained for provenance; `docs/native-design.md` and the README describe the shipped code.
+
 Module-by-module plan for rewriting firepanda in Rust, with `primp` for browser impersonation
 (search), mapped to the existing black-box test suite. The Python tests are the parity contract:
-they spawn `$BINARY --lightpanda $LP` over stdio and never see C++ internals, so they run
+they spawn `$BINARY --lightpanda $LP` over stdio and never see Rust internals, so they run
 unchanged against a Rust binary.
 
 ## 1. Scope and ground rules
@@ -10,9 +14,10 @@ unchanged against a Rust binary.
 - Source today: `src/main.cpp` (326) + `src/browser.cpp` (805) + `src/tools.cpp` (595) +
   `src/browser.hpp` (75) + `src/json.hpp` (60) + `src/extract.js` (197) = **2,058 lines**.
 - Target: **~1.5–2.5k lines Rust** (serde types are verbose; deadline/pool code shrinks).
-- Parity contract: all 7 ctest suites green against the Rust binary:
+- Parity contract (historical): the seven ctest suites green against the Rust binary:
   `json_size`, `protocol`, `dependency_updates`, `installer`, `cdp_transport`,
-  `native_browser`, `memory_stress`.
+  `native_browser`, `memory_stress`. After M8, `json_size` lives in `cargo test`,
+  `dependency_updates` is gone with FetchContent, and the Python suites remain.
 - Behavior that must survive verbatim (see §5): BFS ordering under concurrency,
   failure → drain → `restart()`, SIGTERM teardown, lazy idle shutdown, one managed Lightpanda
   child, validation-before-browser-start, closed-stdout fast exit.
@@ -87,7 +92,6 @@ tokio timeouts and `JoinSet`.
 | M6 | `json.rs` bounded helpers + cap | **json_size** ported as `cargo test` |
 | M7 | `search/*` behind `--features search`: primp DDG/Brave, `search` tool (4th tool) | new fixture tests (offline HTML) + `tests/memory.py` tool-count 3→4 update |
 | M8 | packaging/release swap: delete `src/*.cpp`, CMake → thin wrapper or `just`/Makefile, docs (README, native-design, releasing), CI drops sanitizer jobs | full suite green on release artifacts for macOS arm64 + Linux |
-
 M0–M5 are parity; M6–M7 are additive; M8 is deletion. Estimate: **8–15 working days**
 (M1+M2 are the long poles; M3–M5 mostly re-derive encoded quirks).
 

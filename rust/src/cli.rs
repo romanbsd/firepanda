@@ -1,5 +1,5 @@
-//! CLI parsing. Ported from `src/main.cpp` argv handling: identical exit codes
-//! (2 for option validation, 0 for --help/--version) and stderr messages.
+//! CLI parsing: exit codes (2 for option validation, 0 for --help/--version)
+//! and stderr messages mirror the historical C++ CLI.
 
 use crate::browser::Options;
 use std::time::Duration;

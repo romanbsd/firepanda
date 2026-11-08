@@ -1,4 +1,5 @@
 {
+  "historical": "Recorded from the C++ implementation removed in the Rust rewrite; retained for provenance.",
   "recorded": "2026-11-05",
   "platform": "macOS arm64",
   "readiness_probe": {

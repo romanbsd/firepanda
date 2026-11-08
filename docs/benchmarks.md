@@ -1,17 +1,17 @@
 # Benchmark methodology
 
-Benchmarks are local synthetic measurements, recorded on macOS arm64 on
-2026-11-05. They measure specific costs, not general superiority over other tools.
-Public website latency, JavaScript compatibility, blocked pages, and server load
-can dominate real scraping results. No UDS-versus-TCP comparison was performed.
+Benchmarks are local synthetic measurements recorded on macOS arm64. They measure
+specific costs, not general superiority over other tools. Public website latency,
+JavaScript compatibility, blocked pages, and server load can dominate real
+scraping results. No UDS-versus-TCP comparison was performed.
 
 ## Service wall time
 
-From a Release source build with Python 3.11+ and a native Lightpanda binary:
+From a release source build with Python 3.11+ and a native Lightpanda binary:
 
 ```sh
-python3 scripts/benchmark.py --binary build/firepanda \
-  --lightpanda .local/bin/lightpanda --iterations 20 --output build/benchmark.json
+python3 scripts/benchmark.py --binary rust/target/release/firepanda \
+  --lightpanda .local/bin/lightpanda --iterations 20 --output dist/benchmark.json
 ```
 
 The benchmark runs a local threaded HTTP fixture and one Firepanda stdio process,
@@ -32,60 +32,52 @@ The report includes executable size, version, architecture, and Lightpanda SHA-2
 | Bounded crawl, serial | 10000-link root plus 50 leaves at `maxConcurrency=1` |
 | Bounded crawl, concurrent | The same crawl at `maxConcurrency=4` |
 
-Run on an otherwise idle machine, retain the compiler/build configuration, and
-compare the same fixtures and Lightpanda version across binaries. Earlier service
-A/B runs varied between runs, so the README makes no whole-service speedup claim.
+Run on an otherwise idle machine, retain the build configuration, and compare the
+same fixtures and Lightpanda version across binaries. Whole-service A/B runs vary
+between executions, so the README makes no general throughput claim.
 
-## Current tagged build
+## Rust 0.2.0 build
 
-Firepanda 0.2.0, AppleClang 21 Release, Lightpanda 1.0.2, cpp-httplib v0.64.0,
-and nlohmann/json v3.12.0; 20 samples per warm scenario. The cold value is one
-first request. The executable was 539672 bytes (about 527 KiB),
-excluding the separately installed Lightpanda binary and its runtime memory.
-Raw metadata and min/max timings are in [benchmark-data.json](benchmark-data.json).
+Firepanda 0.2.0, Rust 1.99.1 release, Lightpanda 1.0.2, local HTTP fixtures,
+5 samples per warm scenario. The cold value is one first request.
 
 | Scenario | Time (ms) |
 | --- | ---: |
-| Cold first scrape | 67.23 |
-| Warm small page | 2.57 |
-| 256 KiB Markdown | 6.11 |
-| 3000-paragraph article | 29.92 |
-| 10000 links | 142.78 |
-| JavaScript readiness (300 ms timer) | 309.71 |
+| Cold launch + first scrape | 28.8 |
+| Warm small page | 1.7 |
+| 256 KiB Markdown | 3.8 |
+| 3000-paragraph article | 26.0 |
+| 10000 links | 37.6 |
+| JavaScript readiness (300 ms timer) | 309.2 |
+| Crawl of 51 pages, `maxConcurrency=1` | 142.5 |
+| Crawl of 51 pages, `maxConcurrency=4` | 90.2 |
 
-These are local fixture wall times, not public-site latency or throughput guarantees.
+The crawl window improves 1.58× from concurrency 1 to 4. The previous C++
+implementation measured 252.9 ms and 199.3 ms (1.27×) on the same fixtures; those
+numbers are retained only as a reference point. These are local fixture wall
+times, not public-site latency or throughput guarantees.
 
-## Bounded JSON counting
+## Bounded JSON size accounting
 
-```sh
-./build/json_test --benchmark
-```
+The JSON budget helper is `serialized_size_within` in `rust/src/json.rs`, ported
+from the former C++ test suite. It serializes with the real serializer, compares
+the byte count to the limit, and returns `None` when the limit is exceeded. It is
+covered by `cargo test` across null/booleans/integers/unsigned maximum/floats/
+non-finite values/escaped UTF-8/arrays/objects/nested values and 256 KiB and 4 MiB
+payloads, at exact-size, size+1, size−1, zero, and `usize::MAX` limits.
 
-The executable constructs JSON with 256 KiB and 9 MiB text fields and compares
-100 calls to `dump().size()` against `serialized_size_within` at a 4 MiB limit.
-This uses the real JSON serializer for escaping/UTF-8/number behavior. Counting
-avoids a full payload-sized output allocation and stops once the limit is exceeded.
-One development run measured about 1501 ms versus 662 ms for the rejected 9 MiB
-case. The accepted 256 KiB case was about 44 ms versus 41 ms. Timing varies by
-compiler and host; this is a microbenchmark rather than a complete crawl.
+The crate serializes a full page to measure it, so the historical C++ microbenchmark
+(`json_test --benchmark`, bounded counting versus `dump().size()`) no longer
+applies. Crawl keeps the same 4 MiB budget semantics.
 
-## Readiness scan CPU
+## Readiness scan CPU (historical)
 
-[Retained measurements](benchmark-data.json) contain an instrumented page probe:
-10000 sidebar div/paragraph pairs, 300 article paragraphs, a one-second
-`waitForText` wait for absent literal `absent_needle`, and a 50 ms polling interval.
-It counts calls to the text scanner and sums `performance.now()` durations around
-those calls, including the same DOM traversal in both versions.
+The earlier C++ extractor instrumented its readiness probe: 10000 sidebar
+div/paragraph pairs, 300 article paragraphs, a one-second `waitForText` wait for
+absent literal `absent_needle`, and a 50 ms polling interval. Mutation-observer
+invalidation reduced 20 scans / 65.62 ms to 1 scan / 3.09 ms on Lightpanda 1.0.2.
 
-The original scan ran on every polling iteration. The current version observes
-child-list and character-data mutations on the document root and scans only after
-invalidation. The stable Lightpanda 1.0.2 run measured 20 scans / 65.62 ms before
-and 1 scan / 3.09 ms after. The wall-clock readiness timeout is still one second.
-A nightly run also reduced 20 scans to one. Mutation notifications were checked
-for inserted nodes and direct character-data edits. Functional tests cover these,
-body replacement, selector-property changes, and fallback without an observer.
-
-The same probe measured a prototype cloning only the first main element, with
-20 timed repetitions and one warm-up. It saved about 1.5 ms on that synthetic
-fixture, but did not implement general hidden-ancestor/article selection rules.
-That prototype was not adopted; these numbers are explicitly an upper bound.
+The shipped Rust extractor keeps the mutation-observer behavior but not the
+instrumentation, so those numbers describe the earlier build. Functional tests
+cover invalidation, body replacement, selector-property changes, and fallback
+without an observer. [Retained data](benchmark-data.json) is from that C++ run.

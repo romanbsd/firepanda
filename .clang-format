@@ -1,5 +1,0 @@
-BasedOnStyle: LLVM
-Standard: c++20
-ColumnLimit: 100
-InsertBraces: true
-AllowShortFunctionsOnASingleLine: Empty

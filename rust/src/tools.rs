@@ -1,6 +1,6 @@
 //! Tool table, option schema, argument validation, and URL normalization.
-//! Ported row-for-row from `src/tools.cpp`: schema bounds, defaults, and
-//! per-tool applicability all derive from the same static tables.
+//! Schema bounds, defaults, and per-tool applicability all derive from the
+//! same static tables.
 
 mod crawl;
 
