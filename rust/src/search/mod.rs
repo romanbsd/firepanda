@@ -265,13 +265,11 @@ async fn search_engine(
 /// Read an engine page with a hard size cap. Engine pages are UTF-8; a
 /// lossy decode only matters for malformed responses that fail parsing anyway.
 async fn read_body(mut response: primp::Response) -> Result<String, String> {
-    if response
-        .content_length()
-        .is_some_and(|length| length > u64::try_from(MAX_BODY_BYTES).unwrap_or(u64::MAX))
-    {
-        return Err("Search response exceeds 8 MiB".to_string());
+    let declared = response.content_length();
+    if declared.is_some_and(|length| length > u64::try_from(MAX_BODY_BYTES).unwrap_or(u64::MAX)) {
+        return Err(body_too_large());
     }
-    let expected = usize::try_from(response.content_length().unwrap_or(0))
+    let expected = usize::try_from(declared.unwrap_or(0))
         .unwrap_or(MAX_BODY_BYTES)
         .min(MAX_BODY_BYTES);
     let mut body = Vec::with_capacity(expected);
@@ -281,11 +279,26 @@ async fn read_body(mut response: primp::Response) -> Result<String, String> {
         .map_err(|error| format!("Search response failed: {}", error.without_url()))?
     {
         if chunk.len() > MAX_BODY_BYTES - body.len() {
-            return Err("Search response exceeds 8 MiB".to_string());
+            return Err(body_too_large());
         }
         body.extend_from_slice(&chunk);
     }
-    Ok(String::from_utf8_lossy(&body).into_owned())
+    Ok(text_or_lossy(body))
+}
+
+fn body_too_large() -> String {
+    format!(
+        "Search response exceeds {} MiB",
+        MAX_BODY_BYTES / (1024 * 1024)
+    )
+}
+
+/// UTF-8 is the normal case; a lossy decode only matters for malformed pages.
+fn text_or_lossy(bytes: Vec<u8>) -> String {
+    match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(error) => String::from_utf8_lossy(error.as_bytes()).into_owned(),
+    }
 }
 
 struct Item {
@@ -297,7 +310,7 @@ struct Item {
 /// Keep first occurrence of each normalized URL, in engine order.
 fn dedupe(items: Vec<Item>, limit: usize) -> Vec<Value> {
     let mut seen = std::collections::HashSet::new();
-    let mut results = Vec::new();
+    let mut results = Vec::with_capacity(items.len().min(limit));
     for item in items {
         if results.len() == limit {
             break;
@@ -476,7 +489,7 @@ fn percent_decode(input: &str) -> String {
             }
         }
     }
-    String::from_utf8_lossy(&output).into_owned()
+    text_or_lossy(output)
 }
 
 const fn hex_value(byte: u8) -> Option<u8> {

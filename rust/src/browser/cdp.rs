@@ -2,7 +2,7 @@
 //! per-page scrape pipeline. `tests/transport.py` pins the adversarial
 //! behavior.
 
-use super::{PageRequest, Stop};
+use super::{Format, PageRequest, Stop};
 use crate::json::{ParseError, check_depth};
 use crate::tools::MAX_LINKS;
 use futures_util::{SinkExt, StreamExt};
@@ -443,7 +443,7 @@ fn validate_extraction(result: &mut Value, request: &PageRequest) -> Result<(), 
     for format in &request.formats {
         let valid = match result.get(format.as_str()) {
             None => false,
-            Some(value) if format == "links" => value.is_array(),
+            Some(value) if *format == Format::Links => value.is_array(),
             Some(value) => value.is_string(),
         };
         if !valid {
@@ -588,7 +588,7 @@ mod tests {
     fn extraction_validation_catches_malformed_payloads() {
         let request = PageRequest {
             url: "https://example.com".to_string(),
-            formats: vec!["markdown".to_string()],
+            formats: vec![Format::Markdown],
             only_main_content: true,
             timeout: Duration::from_secs(1),
             wait_for: Duration::ZERO,

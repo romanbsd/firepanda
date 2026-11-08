@@ -5,6 +5,7 @@
 mod cdp;
 
 use cdp::{Connection, ScrapeError};
+use serde::Serialize;
 use serde_json::Value;
 use std::os::fd::FromRawFd;
 use std::sync::Arc;
@@ -43,11 +44,60 @@ impl Default for Options {
     }
 }
 
+/// Closed set of extraction formats, serialized with the wire names the
+/// in-page extractor expects. Keeping this typed prevents invalid formats from
+/// reaching a page and makes the "links" checks plain enum comparisons.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum Format {
+    #[serde(rename = "markdown")]
+    Markdown,
+    #[serde(rename = "text")]
+    Text,
+    #[serde(rename = "html")]
+    Html,
+    #[serde(rename = "rawHtml")]
+    RawHtml,
+    #[serde(rename = "links")]
+    Links,
+}
+
+impl Format {
+    pub const ALL: [Self; 5] = [
+        Self::Markdown,
+        Self::Text,
+        Self::Html,
+        Self::RawHtml,
+        Self::Links,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Markdown => "markdown",
+            Self::Text => "text",
+            Self::Html => "html",
+            Self::RawHtml => "rawHtml",
+            Self::Links => "links",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|format| format.as_str() == value)
+    }
+}
+
+impl std::fmt::Display for Format {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 /// Validated once at the tool boundary, then reused for each page of a crawl.
 #[derive(Debug, Clone)]
 pub struct PageRequest {
     pub url: String,
-    pub formats: Vec<String>,
+    pub formats: Vec<Format>,
     pub only_main_content: bool,
     pub timeout: Duration,
     pub wait_for: Duration,
@@ -462,6 +512,19 @@ mod tests {
         stop.wait().await; // Already stopped: resolves immediately.
     }
 
+    #[test]
+    fn format_wire_names_round_trip() {
+        for format in Format::ALL {
+            assert_eq!(Format::parse(format.as_str()), Some(format));
+            assert_eq!(format.to_string(), format.as_str());
+            assert_eq!(
+                serde_json::to_value(format).expect("format serializes"),
+                serde_json::Value::String(format.as_str().to_string())
+            );
+        }
+        assert_eq!(Format::parse("pdf"), None);
+    }
+
     #[tokio::test]
     async fn external_socket_never_spawns_or_cleans_the_socket() {
         let browser = Browser::new(
@@ -475,7 +538,7 @@ mod tests {
         let error = browser
             .scrape(&PageRequest {
                 url: "https://example.com".to_string(),
-                formats: vec!["markdown".to_string()],
+                formats: vec![Format::Markdown],
                 only_main_content: true,
                 timeout: Duration::from_millis(500),
                 wait_for: Duration::ZERO,
@@ -507,7 +570,7 @@ mod tests {
         let error = browser
             .scrape(&PageRequest {
                 url: "https://example.com".to_string(),
-                formats: vec!["markdown".to_string()],
+                formats: vec![Format::Markdown],
                 only_main_content: true,
                 timeout: Duration::from_secs(5),
                 wait_for: Duration::ZERO,

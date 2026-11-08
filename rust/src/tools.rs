@@ -4,7 +4,7 @@
 
 mod crawl;
 
-use crate::browser::{Browser, PageRequest};
+use crate::browser::{Browser, Format, PageRequest};
 use crate::json::as_integer;
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -13,7 +13,6 @@ use std::time::Duration;
 pub const MAX_LINKS: usize = 10000;
 /// Serialization budget for crawl results.
 const MAX_CRAWL_BYTES: usize = 4 * 1024 * 1024;
-const FORMATS: [&str; 5] = ["markdown", "text", "html", "rawHtml", "links"];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
@@ -269,7 +268,7 @@ fn schema_of(option: &OptionDef) -> Value {
         OptionKind::Formats => json!({
             "type": "array",
             "minItems": 1,
-            "items": {"type": "string", "enum": FORMATS},
+            "items": {"type": "string", "enum": Format::ALL},
             "default": ["markdown"],
             "description": option.description,
         }),
@@ -282,10 +281,6 @@ fn parse_tool(name: &str) -> Result<Tool, String> {
         .find(|entry| entry.name == name)
         .map(|entry| entry.id)
         .ok_or_else(|| format!("Unknown tool: {name}"))
-}
-
-fn has_format(selected: &[String], format: &str) -> bool {
-    selected.iter().any(|entry| entry == format)
 }
 
 fn ascii_case_eq(value: &str, expected: &str) -> bool {
@@ -434,18 +429,18 @@ pub fn parse_request(args: &Value, tool: Tool) -> Result<PageRequest, String> {
             return Err("formats must be a nonempty array".to_string());
         }
         for value in list {
-            let Some(format) = value.as_str() else {
+            let Some(name) = value.as_str() else {
                 return Err("Each format must be a string".to_string());
             };
-            if !FORMATS.contains(&format) {
-                return Err(format!("Unsupported format: {format}"));
-            }
-            if !has_format(&request.formats, format) {
-                request.formats.push(format.to_string());
+            let Some(format) = Format::parse(name) else {
+                return Err(format!("Unsupported format: {name}"));
+            };
+            if !request.formats.contains(&format) {
+                request.formats.push(format);
             }
         }
     } else {
-        request.formats.push("markdown".to_string());
+        request.formats.push(Format::Markdown);
     }
     Ok(request)
 }
@@ -606,7 +601,7 @@ mod tests {
             Tool::Crawl,
         )
         .unwrap();
-        assert_eq!(ok.formats, vec!["markdown".to_string()]);
+        assert_eq!(ok.formats, vec![Format::Markdown]);
     }
 
     #[test]

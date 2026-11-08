@@ -6,7 +6,7 @@
 //! relaunched.
 
 use super::{MAX_CRAWL_BYTES, MAX_LINKS, Tool, normalize_url, origin};
-use crate::browser::{Browser, PageRequest, PageTask};
+use crate::browser::{Browser, Format, PageRequest, PageTask};
 use crate::json::serialized_size_within;
 use serde_json::{Value, json};
 use std::collections::{HashSet, VecDeque};
@@ -84,7 +84,8 @@ impl Crawl {
             return Ok(()); // Sequential stops at the first overflow.
         }
         let listed = page
-            .pointer("/metadata/url")
+            .get("metadata")
+            .and_then(|metadata| metadata.get("url"))
             .and_then(Value::as_str)
             .ok_or_else(|| "Page metadata must include a URL".to_string())?;
         let canonical = normalize_url(listed)?;
@@ -203,11 +204,11 @@ pub async fn run(
     let deadline = Instant::now() + CRAWL_BUDGET;
     let page_timeout = request.timeout;
     let page_formats = if tool == Tool::Map {
-        vec!["links".to_string()]
+        vec![Format::Links]
     } else {
         request.formats.clone()
     };
-    let return_links = page_formats.iter().any(|format| format == "links");
+    let return_links = page_formats.contains(&Format::Links);
     let mut crawl = Crawl::new(tool, &start_origin, max_depth, return_links);
     crawl.queued.insert(start_origin.clone());
     crawl.queue.push_back((start_origin, 0));
@@ -234,10 +235,8 @@ pub async fn run(
             }
             crawl.attempted += 1;
             let mut formats = page_formats.clone();
-            if (return_links || depth < crawl.max_depth)
-                && !formats.iter().any(|format| format == "links")
-            {
-                formats.push("links".to_string());
+            if (return_links || depth < crawl.max_depth) && !formats.contains(&Format::Links) {
+                formats.push(Format::Links);
             }
             // Build the per-page request directly: cloning the template and
             // then overwriting url/formats/timeout would copy them twice.
@@ -291,10 +290,10 @@ pub async fn run(
     if !crawl.warnings.is_empty() {
         result["warnings"] = Value::Array(crawl.warnings);
     }
-    result[if tool == Tool::Map { "links" } else { "pages" }] = if tool == Tool::Map {
-        Value::Array(crawl.links)
+    if tool == Tool::Map {
+        result["links"] = Value::Array(crawl.links);
     } else {
-        Value::Array(crawl.pages)
-    };
+        result["pages"] = Value::Array(crawl.pages);
+    }
     result
 }
