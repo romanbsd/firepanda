@@ -20,17 +20,20 @@ say which browser-dependent checks could not run.
 
 ## Dependency updates
 
-Dependencies are pinned in `rust/Cargo.lock`. Update deliberately:
+Dependabot (`.github/dependabot.yml`) opens weekly pull requests against the
+`rust/` Cargo workspace and the GitHub Actions workflows. Minor/patch updates are
+grouped; major updates arrive separately for review. To update locally:
 
 ```sh
 cargo update --manifest-path rust/Cargo.toml
+cargo upgrade --manifest-path rust/Cargo.toml --incompatible
 cargo test --manifest-path rust/Cargo.toml --release
 cargo test --manifest-path rust/Cargo.toml --release --features search
 ```
 
-Review the lockfile diff and upstream license/API changes. New runtime
-dependencies should keep the binary small; search-only crates stay behind the
-`search` feature. There is no automated dependency-bump workflow.
+Review the lockfile diff and upstream license/API changes before merging. New
+runtime dependencies should keep the binary small; search-only crates stay behind
+the `search` feature.
 
 ## Prepare a release
 
