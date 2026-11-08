@@ -309,6 +309,10 @@ make gates          # protocol, transport, integration, memory (needs Lightpanda
 make search-gates   # offline search fixtures, separate target directory
 ```
 
+`clippy` runs with the pedantic and nursery groups enabled in `Cargo.toml`
+(doc-only lints that would force boilerplate are allowed), so the CI `-D warnings`
+step ratchets the stricter set.
+
 `tests/protocol.py` covers modern/legacy wire behavior, malformed requests,
 argument validation, notifications, and missing-browser errors.
 `tests/transport.py` uses adversarial Unix-socket CDP peers for pings, fragments,

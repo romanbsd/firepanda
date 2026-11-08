@@ -102,7 +102,7 @@ struct Process {
 
 struct Inner {
     process: Mutex<Process>,
-    /// Idle connections between page fetches; returned through give_back.
+    /// Idle connections between page fetches; returned through `give_back`.
     free: Mutex<Vec<Connection>>,
     stop: Stop,
     /// False for `--socket`: an external peer is never spawned or killed.
@@ -227,6 +227,11 @@ impl Browser {
 
     /// Connect, launching the managed browser first. Serialized by the
     /// process mutex so concurrent checkouts can never race a second spawn.
+    ///
+    /// The guard is intentionally held across the connect attempts: releasing
+    /// it would let a second dispatch spawn another child or see a socket that
+    /// is still being created.
+    #[allow(clippy::significant_drop_tightening)]
     async fn connect(&self, connection: &mut Connection, deadline: Instant) -> Result<(), String> {
         if connection.is_open() {
             return Ok(());
@@ -234,7 +239,7 @@ impl Browser {
         let mut process = self.inner.process.lock().await;
         let owns_process = self.inner.owns_process;
         if owns_process {
-            launch(&mut process).await?;
+            launch(&mut process)?;
         }
         let socket = process.options.socket.clone();
         loop {
@@ -249,10 +254,10 @@ impl Browser {
             if !owns_process {
                 break; // External peers get exactly one attempt (C++ `own` check).
             }
-            let gone = match process.child.as_mut() {
-                Some(child) => !matches!(child.try_wait(), Ok(None)),
-                None => true,
-            };
+            let gone = process
+                .child
+                .as_mut()
+                .is_none_or(|child| !matches!(child.try_wait(), Ok(None)));
             if gone {
                 process.child = None;
                 return Err("Lightpanda exited before opening its Unix socket".to_string());
@@ -261,8 +266,8 @@ impl Browser {
                 break;
             }
             tokio::select! {
-                _ = self.inner.stop.wait() => {}
-                _ = tokio::time::sleep(CONNECT_RETRY) => {}
+                () = self.inner.stop.wait() => {}
+                () = tokio::time::sleep(CONNECT_RETRY) => {}
             }
         }
         Err(format!(
@@ -286,27 +291,27 @@ impl Browser {
         }
     }
 
-    /// None while no managed browser is running or idle timeout is disabled.
-    pub async fn idle_deadline(&self) -> Option<Instant> {
-        let process = self.inner.process.lock().await;
-        if !self.inner.owns_process
-            || process.child.is_none()
-            || process.options.idle_timeout.is_zero()
-        {
-            return None;
-        }
-        process
-            .idle_since
-            .map(|since| since + process.options.idle_timeout)
-    }
-
-    pub async fn stop_if_idle(&self) {
-        if let Some(deadline) = self.idle_deadline().await
-            && Instant::now() >= deadline
-        {
+    /// Stop an expired idle browser and return the next deadline. Expiry and
+    /// deadline are read under one lock; `shutdown` only re-locks when it runs.
+    pub async fn expire_if_idle(&self) -> Option<Instant> {
+        let deadline = {
+            let process = self.inner.process.lock().await;
+            if !self.inner.owns_process
+                || process.child.is_none()
+                || process.options.idle_timeout.is_zero()
+            {
+                return None;
+            }
+            process
+                .idle_since
+                .map(|since| since + process.options.idle_timeout)
+        };
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             // Called only between requests, never during active CDP work.
             self.shutdown().await;
+            return None;
         }
+        deadline
     }
 }
 
@@ -343,14 +348,19 @@ async fn attempt(socket: &str) -> Result<CdpStream, ()> {
         .unwrap_or(Err(()))
 }
 
+/// One spawn-failure message for both `dup` and `spawn` failures.
+fn start_error(error: &std::io::Error) -> String {
+    format!("Cannot start Lightpanda: {error}; use --lightpanda /path/to/lightpanda")
+}
+
 /// Spawn the managed browser: `lightpanda serve --unix-socket … --log-level
 /// error`, stdin /dev/null, stdout redirected to stderr so a browser log can
-/// never corrupt the MCP byte stream (C++ posix_spawn file actions).
-async fn launch(process: &mut Process) -> Result<(), String> {
-    let running = match process.child.as_mut() {
-        Some(child) => matches!(child.try_wait(), Ok(None)),
-        None => false,
-    };
+/// never corrupt the MCP byte stream (C++ `posix_spawn` file actions).
+fn launch(process: &mut Process) -> Result<(), String> {
+    let running = process
+        .child
+        .as_mut()
+        .is_some_and(|child| matches!(child.try_wait(), Ok(None)));
     if running {
         return Ok(()); // Still running; reuse it.
     }
@@ -364,10 +374,7 @@ async fn launch(process: &mut Process) -> Result<(), String> {
     let _ = std::fs::remove_file(&socket); // A stale socket would fail the bind.
     let duplicate = unsafe { libc::dup(libc::STDERR_FILENO) };
     if duplicate < 0 {
-        let error = std::io::Error::last_os_error();
-        return Err(format!(
-            "Cannot start Lightpanda: {error}; use --lightpanda /path/to/lightpanda"
-        ));
+        return Err(start_error(&std::io::Error::last_os_error()));
     }
     let stdout = unsafe { std::os::fd::OwnedFd::from_raw_fd(duplicate) };
     let child = Command::new(&process.options.lightpanda)
@@ -381,9 +388,7 @@ async fn launch(process: &mut Process) -> Result<(), String> {
         .stderr(std::process::Stdio::inherit())
         .kill_on_drop(false)
         .spawn()
-        .map_err(|error| {
-            format!("Cannot start Lightpanda: {error}; use --lightpanda /path/to/lightpanda")
-        })?;
+        .map_err(|error| start_error(&error))?;
     process.child = Some(child);
     Ok(())
 }
@@ -394,9 +399,8 @@ async fn stop_child(process: &mut Process) {
         return;
     };
     match child.try_wait() {
-        Ok(Some(_)) => return, // Already exited; never signal a reused PID.
+        Ok(Some(_)) | Err(_) => return, // Already exited (or unreaped); never signal a reused PID.
         Ok(None) => {}
-        Err(_) => return,
     }
     // A reaped child has no pid; treat that like an already-exited process.
     let Some(pid) = child.id() else {
@@ -407,9 +411,8 @@ async fn stop_child(process: &mut Process) {
     }
     for _ in 0..50 {
         match child.try_wait() {
-            Ok(Some(_)) => return,
+            Ok(Some(_)) | Err(_) => return,
             Ok(None) => tokio::time::sleep(Duration::from_millis(10)).await,
-            Err(_) => return,
         }
     }
     let _ = child.start_kill();
@@ -485,8 +488,9 @@ mod tests {
         );
         let process = browser.inner.process.lock().await;
         assert_eq!(process.options.socket, "/tmp/unused-cdp.sock");
-        assert!(process.directory.is_empty());
+        assert_eq!(process.directory, "");
         assert!(process.child.is_none());
+        drop(process);
     }
 
     #[tokio::test]
@@ -513,7 +517,8 @@ mod tests {
         assert!(error.contains("Cannot start Lightpanda"), "{error}");
         // The failed launch's private directory is removed by shutdown.
         let process = browser.inner.process.lock().await;
-        assert!(process.directory.is_empty());
+        assert_eq!(process.directory, "");
         assert!(process.child.is_none());
+        drop(process);
     }
 }

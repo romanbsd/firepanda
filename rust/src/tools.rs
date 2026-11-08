@@ -55,8 +55,7 @@ static TOOL_TABLE: &[ToolDef] = &[
     ToolDef {
         id: Tool::Search,
         name: "search",
-        description: "Search the web without an API key using browser-impersonated requests \
-                      to DuckDuckGo and Brave. Returns titles, URLs, and snippets.",
+        description: crate::search::DESCRIPTION,
     },
 ];
 
@@ -130,7 +129,7 @@ const OPTIONS: [OptionDef; 10] = [
         "Total per-page budget in milliseconds, including navigation and extraction",
         fallback = 30000,
         minimum = 100,
-        maximum = 120000
+        maximum = 120_000
     ),
     opt!(
         "waitFor",
@@ -202,10 +201,10 @@ fn parse_integer(args: &Value, name: &str) -> Result<i64, String> {
     let Some(actual) = as_integer(value) else {
         return Err(format!("{name} must be an integer"));
     };
-    if actual < option.minimum as i128 || actual > option.maximum as i128 {
+    if actual < i128::from(option.minimum) || actual > i128::from(option.maximum) {
         return Err(format!("{name} is outside the supported range"));
     }
-    Ok(actual as i64)
+    i64::try_from(actual).map_err(|_| format!("{name} is outside the supported range"))
 }
 
 fn parse_string(args: &Value, name: &str) -> Result<String, String> {
@@ -218,7 +217,7 @@ fn parse_string(args: &Value, name: &str) -> Result<String, String> {
             "{name} must be a nonempty string within its byte limit"
         ));
     };
-    if text.is_empty() || text.len() > option.maximum as usize {
+    if text.is_empty() || text.len() > usize::try_from(option.maximum).unwrap_or(usize::MAX) {
         return Err(format!(
             "{name} must be a nonempty string within its byte limit"
         ));
@@ -234,6 +233,15 @@ fn parse_boolean(args: &Value, name: &str) -> Result<bool, String> {
     value
         .as_bool()
         .ok_or_else(|| format!("{name} must be boolean"))
+}
+
+/// Integer option converted to a duration. Every registered integer duration
+/// has a nonnegative bound, so the conversion cannot fail.
+fn parse_millis(args: &Value, name: &str) -> Result<Duration, String> {
+    let value = parse_integer(args, name)?;
+    Ok(Duration::from_millis(
+        u64::try_from(value).expect("duration option bounds are nonnegative"),
+    ))
 }
 
 fn schema_of(option: &OptionDef) -> Value {
@@ -323,15 +331,14 @@ fn parse_authority(authority: &str) -> Result<Authority<'_>, String> {
         }
         (host, String::new())
     };
-    let mut port = "";
-    let mut has_port = false;
-    if host.len() != authority.len() {
+    let (port, has_port) = if host.len() == authority.len() {
+        ("", false)
+    } else {
         if authority.as_bytes()[host.len()] != b':' {
             return Err("Invalid URL authority".to_string());
         }
-        port = &authority[host.len() + 1..];
-        has_port = true;
-    }
+        (&authority[host.len() + 1..], true)
+    };
     Ok(Authority {
         host,
         port,
@@ -380,10 +387,7 @@ pub fn normalize_url(input: &str) -> Result<String, String> {
             normalized.push_str(&number.to_string());
         }
     }
-    let path = match host_end {
-        Some(end) => &input[end..],
-        None => "",
-    };
+    let path = host_end.map_or("", |end| &input[end..]);
     let path = &path[..path.find('#').unwrap_or(path.len())];
     if path.is_empty() || path.starts_with('?') {
         normalized.push('/');
@@ -395,10 +399,9 @@ pub fn normalize_url(input: &str) -> Result<String, String> {
 /// Call only after normalization; avoid reparsing for every crawl link.
 pub fn origin(normalized: &str) -> &str {
     let after_scheme = normalized.find("://").map_or(normalized.len(), |i| i + 3);
-    match normalized[after_scheme..].find('/') {
-        Some(offset) => &normalized[..after_scheme + offset],
-        None => normalized,
-    }
+    normalized[after_scheme..]
+        .find('/')
+        .map_or(normalized, |offset| &normalized[..after_scheme + offset])
 }
 
 pub fn parse_request(args: &Value, tool: Tool) -> Result<PageRequest, String> {
@@ -421,8 +424,8 @@ pub fn parse_request(args: &Value, tool: Tool) -> Result<PageRequest, String> {
         url: normalize_url(url)?,
         formats: Vec::new(),
         only_main_content: parse_boolean(args, "onlyMainContent")?,
-        timeout: Duration::from_millis(parse_integer(args, "timeout")? as u64),
-        wait_for: Duration::from_millis(parse_integer(args, "waitFor")? as u64),
+        timeout: parse_millis(args, "timeout")?,
+        wait_for: parse_millis(args, "waitFor")?,
         wait_for_selector: parse_string(args, "waitForSelector")?,
         wait_for_text: parse_string(args, "waitForText")?,
     };
@@ -521,7 +524,7 @@ pub async fn execute(browser: &Browser, name: &str, args: &Value) -> Result<Valu
         request,
         limit,
         max_depth,
-        concurrency as usize,
+        usize::try_from(concurrency).expect("maxConcurrency bounds are nonnegative"),
     )
     .await)
 }

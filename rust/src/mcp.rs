@@ -26,7 +26,7 @@ fn identity() -> Value {
     json!({"name": "firepanda", "version": env!("CARGO_PKG_VERSION")})
 }
 
-pub fn rpc_error(id: Value, code: i32, message: &str) -> Value {
+pub fn rpc_error(id: &Value, code: i32, message: &str) -> Value {
     json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
 }
 
@@ -47,14 +47,8 @@ impl Server {
         }
     }
 
-    pub async fn stop_if_idle(&self) {
-        self.browser.stop_if_idle().await;
-    }
-
-    /// None while no managed browser is running (drives the stdio loop's
-    /// idle select arm, like C++ `wait_for_input(idle_deadline)`).
     pub async fn idle_deadline(&self) -> Option<Instant> {
-        self.browser.idle_deadline().await
+        self.browser.expire_if_idle().await
     }
 
     /// Tear the browser down when the service exits (C++ destructor path).
@@ -67,18 +61,9 @@ impl Server {
     }
 
     fn initialize(&mut self, params: &Value) -> Result<Value, String> {
-        let well_formed = params
-            .get("protocolVersion")
-            .map(Value::is_string)
-            .unwrap_or(false)
-            && params
-                .get("capabilities")
-                .map(Value::is_object)
-                .unwrap_or(false)
-            && params
-                .get("clientInfo")
-                .map(Value::is_object)
-                .unwrap_or(false);
+        let well_formed = params.get("protocolVersion").is_some_and(Value::is_string)
+            && params.get("capabilities").is_some_and(Value::is_object)
+            && params.get("clientInfo").is_some_and(Value::is_object);
         if !well_formed {
             return Err(
                 "initialize requires protocolVersion, capabilities, and clientInfo".to_string(),
@@ -107,15 +92,13 @@ impl Server {
         Ok(json!({"tools": tools::tools_list()}))
     }
 
-    async fn tools_call(&mut self, params: &Value) -> Result<Value, String> {
+    async fn tools_call(&self, params: &Value) -> Result<Value, String> {
         let Some(name) = params.get("name").and_then(Value::as_str) else {
             return Err("Tool name must be a string".to_string());
         };
-        let arguments = params
-            .get("arguments")
-            .cloned()
-            .unwrap_or_else(|| json!({}));
-        match tools::execute(&self.browser, name, &arguments).await {
+        let default = Value::Object(serde_json::Map::new());
+        let arguments = params.get("arguments").unwrap_or(&default);
+        match tools::execute(&self.browser, name, arguments).await {
             Ok(data) => {
                 let text = serde_json::to_string(&data)
                     .map_err(|error| format!("Cannot serialize tool result: {error}"))?;
@@ -145,56 +128,58 @@ impl Server {
     /// Handle one validated JSON-RPC message; `None` means no reply
     /// (notifications). Error-code precedence mirrors `src/main.cpp`.
     pub async fn handle(&mut self, request: &Value) -> Option<Value> {
-        let mut id = Value::Null;
-        if request.is_object() {
-            id = request.get("id").cloned().unwrap_or(Value::Null);
-        }
+        let id = if request.is_object() {
+            request.get("id").cloned().unwrap_or(Value::Null)
+        } else {
+            Value::Null
+        };
         let envelope_ok = request.is_object()
-            && request.get("jsonrpc").map(|v| v == "2.0").unwrap_or(false)
-            && request.get("method").map(Value::is_string).unwrap_or(false)
+            && request.get("jsonrpc").is_some_and(|v| v == "2.0")
+            && request.get("method").is_some_and(Value::is_string)
             && (request.get("id").is_none() || id.is_string() || is_integer(&id))
-            && (request.get("params").is_none()
-                || request.get("params").map(Value::is_object).unwrap_or(false));
+            && request.get("params").is_none_or(Value::is_object);
         if !envelope_ok {
-            return Some(rpc_error(Value::Null, -32600, "Invalid JSON-RPC request"));
+            return Some(rpc_error(&Value::Null, -32600, "Invalid JSON-RPC request"));
         }
         // Notifications (no id) get no reply.
         request.get("id")?;
-        let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
-        let meta = params.get("_meta").cloned().unwrap_or_else(|| json!({}));
+        let empty = Value::Object(serde_json::Map::new());
+        let params = request.get("params").unwrap_or(&empty);
+        let meta = params.get("_meta").unwrap_or(&empty);
         if !meta.is_object() {
-            return Some(rpc_error(id, -32602, "_meta must be an object"));
+            return Some(rpc_error(&id, -32602, "_meta must be an object"));
         }
-        let version = meta.get(VERSION_KEY).cloned().unwrap_or(Value::Null);
-        let modern = version == PROTOCOL_VERSION;
-        if !version.is_null() && version != PROTOCOL_VERSION {
-            let mut response = rpc_error(id, -32022, "Unsupported protocol version");
+        let null = Value::Null;
+        let version = meta.get(VERSION_KEY).unwrap_or(&null);
+        let modern = version.as_str() == Some(PROTOCOL_VERSION);
+        if !version.is_null() && !modern {
+            let mut response = rpc_error(&id, -32022, "Unsupported protocol version");
             response["error"]["data"] = json!({"supported": VERSIONS, "requested": version});
             return Some(response);
         }
         let method = request["method"].as_str().unwrap_or_default();
         let dispatched: Result<Value, String> = match method {
             "server/discover" => Ok(Self::discover()),
-            "initialize" => self.initialize(&params),
+            "initialize" => self.initialize(params),
             other => {
                 if !modern && !self.initialized {
                     return Some(rpc_error(
-                        id,
+                        &id,
                         -32600,
                         "Initialize first or provide modern protocol metadata",
                     ));
                 }
                 match other {
                     "ping" => Ok(json!({})),
-                    "tools/list" => Self::tools_list(&params),
-                    "tools/call" => self.tools_call(&params).await,
-                    _ => return Some(rpc_error(id, -32601, "Method not found")),
+                    "tools/list" => Self::tools_list(params),
+                    "tools/call" => self.tools_call(params).await,
+                    _ => return Some(rpc_error(&id, -32601, "Method not found")),
                 }
             }
         };
         let mut result = match dispatched {
             Ok(result) => result,
-            Err(message) => return Some(rpc_error(id, -32602, &message)),
+            Err(message) => return Some(rpc_error(&id, -32602, &message)),
         };
         if modern || method == "server/discover" {
             result["resultType"] = json!("complete");

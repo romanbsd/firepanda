@@ -24,6 +24,15 @@ struct Inflight {
     task: PageTask,
 }
 
+/// Why dispatch stopped. `Budget` also drops pages that were fetched after the
+/// serialization budget filled, matching the sequential crawl that stops there.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Halt {
+    None,
+    Dispatch,
+    Budget,
+}
+
 /// Frontier, dedupe sets, and the ordered result arrays. `record` folds each
 /// successful page exactly where the sequential crawl would have.
 struct Crawl {
@@ -42,11 +51,8 @@ struct Crawl {
     attempted: i64,
     bytes: usize,
     truncated: bool,
-    /// A bound was reached: stop dispatching; in-flight pages still drain.
-    exhausted: bool,
-    /// Serialization budget overflowed: later pages are dropped even though
-    /// they were fetched, matching the sequential crawl that stops there.
-    budget_reached: bool,
+    /// Dispatch stop reason; `Halt::Budget` also drops later pages.
+    halt: Halt,
 }
 
 impl Crawl {
@@ -67,15 +73,14 @@ impl Crawl {
             attempted: 0,
             bytes: 0,
             truncated: false,
-            exhausted: false,
-            budget_reached: false,
+            halt: Halt::None,
         }
     }
 
     /// Fold one successful page into the result. `Err` means the page itself
     /// was malformed; the caller records it as a per-page error.
     fn record(&mut self, depth: i64, mut page: Value) -> Result<(), String> {
-        if self.budget_reached {
+        if self.halt == Halt::Budget {
             return Ok(()); // Sequential stops at the first overflow.
         }
         let listed = page
@@ -147,8 +152,7 @@ impl Crawl {
             }
             let Some(size) = serialized_size_within(&page, MAX_CRAWL_BYTES - self.bytes) else {
                 self.truncated = true;
-                self.exhausted = true;
-                self.budget_reached = true;
+                self.halt = Halt::Budget;
                 return Ok(());
             };
             self.bytes += size;
@@ -156,9 +160,34 @@ impl Crawl {
         }
         Ok(())
     }
+
+    /// Fold a resolved page (or its error) into the result arrays.
+    fn finish(&mut self, depth: i64, url: &str, outcome: Result<Value, String>) {
+        match outcome {
+            Ok(page) => {
+                if let Err(message) = self.record(depth, page) {
+                    // Recording failures come from a healthy page; the browser
+                    // stays up.
+                    self.errors.push(json!({"url": url, "error": message}));
+                }
+            }
+            Err(message) => self.errors.push(json!({"url": url, "error": message})),
+        }
+    }
 }
 
-/// Run one crawl/map tool call to completion (C++ `execute` discovery path).
+/// Await one in-flight page and normalize worker failures.
+async fn resolve(task: PageTask) -> Result<Value, String> {
+    match task {
+        PageTask::Failed(message) => Err(message),
+        PageTask::Running(handle) => match handle.await {
+            Ok(result) => result,
+            Err(join_error) => Err(format!("Page worker failed: {join_error}")),
+        },
+    }
+}
+
+/// Run one crawl/map tool call to completion (the discovery path).
 pub async fn run(
     browser: &Browser,
     tool: Tool,
@@ -182,12 +211,12 @@ pub async fn run(
     let mut inflight: VecDeque<Inflight> = VecDeque::new();
 
     while !browser.stopped()
-        && (!inflight.is_empty() || (!crawl.queue.is_empty() && !crawl.exhausted))
+        && (!inflight.is_empty() || (!crawl.queue.is_empty() && crawl.halt == Halt::None))
     {
         // Fill the window in frontier order; checkout runs here so the
         // managed browser is spawned exactly once per cold start.
         while !browser.stopped()
-            && !crawl.exhausted
+            && crawl.halt == Halt::None
             && inflight.len() < concurrency
             && let Some((url, depth)) = crawl.queue.pop_front()
         {
@@ -197,7 +226,7 @@ pub async fn run(
             let remaining = deadline.saturating_duration_since(Instant::now());
             if crawl.attempted == limit || remaining < DISPATCH_FLOOR {
                 crawl.truncated = true;
-                crawl.exhausted = true;
+                crawl.halt = Halt::Dispatch;
                 break;
             }
             crawl.attempted += 1;
@@ -216,58 +245,23 @@ pub async fn run(
         let Some(item) = inflight.pop_front() else {
             break; // Nothing in flight and nothing dispatchable.
         };
-        let outcome = match item.task {
-            PageTask::Failed(message) => Err(message),
-            PageTask::Running(handle) => match handle.await {
-                Ok(result) => result,
-                Err(join_error) => Err(format!("Page worker failed: {join_error}")),
-            },
-        };
-        match outcome {
-            Ok(page) => {
-                browser.page_completed().await; // Idle counts from the fetch.
-                if let Err(message) = crawl.record(item.depth, page) {
-                    // Recording failures come from a healthy page; the browser
-                    // stays up.
-                    crawl
-                        .errors
-                        .push(json!({"url": item.url, "error": message}));
-                }
+        let outcome = resolve(item.task).await;
+        if outcome.is_ok() {
+            browser.page_completed().await; // Idle counts from the fetch.
+        }
+        let failed = outcome.is_err();
+        crawl.finish(item.depth, &item.url, outcome);
+        if failed {
+            // A failed fetch invalidates its connection: pause dispatch,
+            // drain the siblings while keeping their results, then reap
+            // and relaunch the browser before anything else is fetched.
+            while let Some(sibling) = inflight.pop_front() {
+                let outcome = resolve(sibling.task).await;
+                crawl.finish(sibling.depth, &sibling.url, outcome);
             }
-            Err(message) => {
-                crawl
-                    .errors
-                    .push(json!({"url": item.url, "error": message}));
-                // A failed fetch invalidates its connection: pause dispatch,
-                // drain the siblings while keeping their results, then reap
-                // and relaunch the browser before anything else is fetched.
-                while let Some(sibling) = inflight.pop_front() {
-                    let sibling_outcome = match sibling.task {
-                        PageTask::Failed(message) => Err(message),
-                        PageTask::Running(handle) => match handle.await {
-                            Ok(result) => result,
-                            Err(join_error) => Err(format!("Page worker failed: {join_error}")),
-                        },
-                    };
-                    match sibling_outcome {
-                        Ok(page) => {
-                            if let Err(message) = crawl.record(sibling.depth, page) {
-                                crawl
-                                    .errors
-                                    .push(json!({"url": sibling.url, "error": message}));
-                            }
-                        }
-                        Err(message) => {
-                            crawl
-                                .errors
-                                .push(json!({"url": sibling.url, "error": message}));
-                        }
-                    }
-                }
-                // restart(): reap the browser and every pooled connection; the
-                // next dispatch cold-starts a new child.
-                browser.shutdown().await;
-            }
+            // restart(): reap the browser and every pooled connection; the
+            // next dispatch cold-starts a new child.
+            browser.shutdown().await;
         }
     }
     // Like the C++ Drain scope: wait for pages still in flight on a stop so

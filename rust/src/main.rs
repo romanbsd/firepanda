@@ -39,11 +39,12 @@ async fn serve(options: browser::Options, stop: browser::Stop) -> i32 {
         if stop.stopped() {
             break;
         }
-        server.stop_if_idle().await;
+        // One lock per turn: expiry and the next deadline come from the same
+        // snapshot (C++ `wait_for_input(idle_deadline)`).
         let idle = server.idle_deadline().await.map(tokio::time::Instant::from);
         let count = tokio::select! {
-            _ = stop.wait() => break,
-            _ = idle_wait(idle) => continue,
+            () = stop.wait() => break,
+            () = idle_wait(idle) => continue,
             read = stdin.read(&mut buffer) => match read {
                 Ok(0) => break,
                 Ok(count) => count,
@@ -76,17 +77,21 @@ async fn serve(options: browser::Options, stop: browser::Stop) -> i32 {
             offset += index + 1;
             // Also expire during a stream of buffered pings/notifications; MCP
             // traffic alone must not keep the browser alive.
-            server.stop_if_idle().await;
+            let _ = server.idle_deadline().await;
             let response = if oversized {
-                Some(mcp::rpc_error(Value::Null, -32600, "Request exceeds 1 MiB"))
+                Some(mcp::rpc_error(
+                    &Value::Null,
+                    -32600,
+                    "Request exceeds 1 MiB",
+                ))
             } else {
                 match json::parse_line(&line) {
                     Ok(request) => server.handle(&request).await,
                     Err(json::ParseError::Nesting(message)) => {
-                        Some(mcp::rpc_error(Value::Null, -32600, &message))
+                        Some(mcp::rpc_error(&Value::Null, -32600, &message))
                     }
                     Err(json::ParseError::Syntax) => {
-                        Some(mcp::rpc_error(Value::Null, -32700, "Parse error"))
+                        Some(mcp::rpc_error(&Value::Null, -32700, "Parse error"))
                     }
                 }
             };

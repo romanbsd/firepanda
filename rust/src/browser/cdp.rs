@@ -63,7 +63,7 @@ pub struct Connection {
 }
 
 impl Connection {
-    pub fn new(stop: Stop) -> Self {
+    pub const fn new(stop: Stop) -> Self {
         Self {
             ws: None,
             stop,
@@ -76,7 +76,7 @@ impl Connection {
         }
     }
 
-    pub fn is_open(&self) -> bool {
+    pub const fn is_open(&self) -> bool {
         self.ws.is_some()
     }
 
@@ -100,8 +100,8 @@ impl Connection {
             }
             let ws = self.ws.as_mut().ok_or_else(|| DISCONNECTED.to_string())?;
             let read = tokio::select! {
-                _ = self.stop.wait() => return Err(STOPPING.to_string()),
-                _ = tokio::time::sleep_until(deadline.into()) => return Err(TIMED_OUT.to_string()),
+                () = self.stop.wait() => return Err(STOPPING.to_string()),
+                () = tokio::time::sleep_until(deadline.into()) => return Err(TIMED_OUT.to_string()),
                 message = ws.next() => message,
             };
             // A read finishing at/after the deadline failed like the C++
@@ -120,8 +120,8 @@ impl Connection {
                         .await
                         .map_err(|_| DISCONNECTED.to_string())?;
                 }
-                Some(Ok(Message::Pong(_))) | Some(Ok(Message::Frame(_))) => {}
-                Some(Ok(Message::Close(_))) | Some(Ok(Message::Binary(_))) | Some(Err(_)) => {
+                Some(Ok(Message::Pong(_) | Message::Frame(_))) => {}
+                Some(Ok(Message::Close(_) | Message::Binary(_)) | Err(_)) => {
                     return Err(DISCONNECTED.to_string());
                 }
             }
@@ -154,14 +154,8 @@ impl Connection {
         };
         // Status must be an integer 100..=599: 201.5 and 99/600 never become
         // an httpStatus (C++ compares get<int> back against the number).
-        let number = match response.get("status").and_then(Value::as_f64) {
-            Some(status) if (100.0..=599.0).contains(&status) => {
-                let truncated = status as i64;
-                if status != truncated as f64 {
-                    return;
-                }
-                truncated
-            }
+        let number = match response.get("status").and_then(Value::as_i64) {
+            Some(status) if (100..=599).contains(&status) => status,
             _ => return,
         };
         if !self.main_frame.is_empty() {
@@ -204,7 +198,7 @@ impl Connection {
         // The deadline owns writes too: a peer that stops reading must not
         // outlive the operation (C++ SocketDeadline shuts the socket down).
         let sent = tokio::select! {
-            _ = self.stop.wait() => return Err(ScrapeError::fatal(STOPPING)),
+            () = self.stop.wait() => return Err(ScrapeError::fatal(STOPPING)),
             sent = tokio::time::timeout_at(deadline.into(), ws.send(Message::text(payload))) => sent,
         };
         if !matches!(sent, Ok(Ok(()))) {
@@ -223,7 +217,7 @@ impl Connection {
                 }
                 Some(value) => match crate::json::as_integer(value) {
                     None => return Err(ScrapeError::fatal("CDP response id must be an integer")),
-                    Some(number) if number != id as i128 => {
+                    Some(number) if number != i128::from(id) => {
                         self.observe(&response);
                         continue;
                     }
@@ -308,7 +302,7 @@ async fn open_page(
         .and_then(Value::as_str)
         .ok_or_else(|| ScrapeError::fatal("Missing sessionId in CDP result"))?
         .to_string();
-    connection.active_session = session.clone();
+    connection.active_session.clone_from(&session);
     connection.main_frame.clear();
     connection.http_status = None;
     connection.early_document_statuses.clear();
@@ -377,8 +371,8 @@ async fn wait_after_load(
         }
         let slice = std::cmp::min(wait_end, Instant::now() + Duration::from_millis(50));
         tokio::select! {
-            _ = stop.wait() => return Err(ScrapeError::fatal(STOPPING)),
-            _ = tokio::time::sleep_until(slice.into()) => {}
+            () = stop.wait() => return Err(ScrapeError::fatal(STOPPING)),
+            () = tokio::time::sleep_until(slice.into()) => {}
         }
     }
     Ok(())
@@ -391,10 +385,12 @@ async fn extract(
     session: &str,
     deadline: Instant,
 ) -> Result<Value, ScrapeError> {
-    let remaining = deadline
-        .saturating_duration_since(Instant::now())
-        .as_millis()
-        .min(i64::MAX as u128) as i64;
+    let remaining = i64::try_from(
+        deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis(),
+    )
+    .unwrap_or(i64::MAX);
     let extraction = json!({
         "maxLinks": MAX_LINKS,
         "formats": request.formats,
@@ -435,8 +431,7 @@ fn validate_extraction(result: &mut Value, request: &PageRequest) -> Result<(), 
         .get("metadata")
         .filter(|value| value.is_object())
         .and_then(|metadata| metadata.get("url"))
-        .map(Value::is_string)
-        .unwrap_or(false);
+        .is_some_and(Value::is_string);
     if !metadata_ok {
         return Err(ScrapeError::fatal("Malformed page extraction metadata"));
     }
@@ -459,7 +454,7 @@ fn validate_extraction(result: &mut Value, request: &PageRequest) -> Result<(), 
         };
         for link in links {
             let valid = link.is_object()
-                && link.get("url").map(Value::is_string).unwrap_or(false)
+                && link.get("url").is_some_and(Value::is_string)
                 && (link.get("title").is_none() || link["title"].is_string());
             if !valid {
                 return Err(ScrapeError::fatal("Malformed extraction link"));

@@ -2,7 +2,7 @@
 //!
 //! Engine recipes are ported from `ddgs` (`ddgs/engines/duckduckgo.py` and
 //! `brave.py`): primp performs browser-impersonated requests, and `scraper`
-//! reads the HTML engine pages with the CSS equivalent of ddgs' item XPaths.
+//! reads the HTML engine pages with the CSS equivalent of ddgs' item `XPaths`.
 //! Results are deduplicated by normalized URL and capped at `limit`.
 //!
 //! The response mirrors Firecrawl v2 search (`{"success": true, "data":
@@ -30,6 +30,11 @@ const DDG_URL: &str = "https://html.duckduckgo.com/html/";
 const BRAVE_URL: &str = "https://search.brave.com/search";
 const DDG_OVERRIDE: &str = "FIREPANDA_SEARCH_DDG_URL";
 const BRAVE_OVERRIDE: &str = "FIREPANDA_SEARCH_BRAVE_URL";
+
+/// Shared by `tools/list` and the tool table so the two cannot drift.
+pub const DESCRIPTION: &str = "Search the web without an API key using browser-impersonated \
+                               requests to DuckDuckGo and Brave. Returns titles, URLs, and \
+                               snippets.";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Engine {
@@ -77,15 +82,7 @@ impl Query {
         }
         let limit = match args.get("limit") {
             None => DEFAULT_LIMIT,
-            Some(value) => {
-                let Some(number) = as_integer(value) else {
-                    return Err("limit must be an integer".to_string());
-                };
-                if number < 1 || number > MAX_LIMIT as i128 {
-                    return Err("limit is outside the supported range".to_string());
-                }
-                number as i64
-            }
+            Some(value) => bounded_integer(value, "limit", 1, MAX_LIMIT)?,
         };
         let engine = match args.get("engine") {
             None => Engine::Auto,
@@ -98,31 +95,38 @@ impl Query {
         };
         let timeout = match args.get("timeout") {
             None => DEFAULT_TIMEOUT_MS,
-            Some(value) => {
-                let Some(number) = as_integer(value) else {
-                    return Err("timeout must be an integer".to_string());
-                };
-                if number < MIN_TIMEOUT_MS as i128 || number > MAX_TIMEOUT_MS as i128 {
-                    return Err("timeout is outside the supported range".to_string());
-                }
-                number as i64
-            }
+            Some(value) => bounded_integer(value, "timeout", MIN_TIMEOUT_MS, MAX_TIMEOUT_MS)?,
         };
         Ok(Self {
             text: text.to_string(),
-            limit: limit as usize,
+            limit: usize::try_from(limit).expect("limit bounds are positive"),
             engine,
-            timeout: Duration::from_millis(timeout as u64),
+            timeout: Duration::from_millis(
+                u64::try_from(timeout).expect("timeout bounds are positive"),
+            ),
         })
     }
+}
+
+/// Integer argument checked against its documented inclusive range.
+fn bounded_integer(value: &Value, name: &str, minimum: i64, maximum: i64) -> Result<i64, String> {
+    let Some(number) = as_integer(value) else {
+        return Err(format!("{name} must be an integer"));
+    };
+    let Ok(number) = i64::try_from(number) else {
+        return Err(format!("{name} is outside the supported range"));
+    };
+    if number < minimum || number > maximum {
+        return Err(format!("{name} is outside the supported range"));
+    }
+    Ok(number)
 }
 
 /// Schema row for `tools/list`; lives here so `tools.rs` stays table-driven.
 pub fn tool_definition() -> Value {
     json!({
         "name": "search",
-        "description": "Search the web without an API key using browser-impersonated requests \
-                        to DuckDuckGo and Brave. Returns titles, URLs, and snippets.",
+        "description": DESCRIPTION,
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -294,7 +298,7 @@ fn collapse(element: &ElementRef<'_>) -> String {
         .join(" ")
 }
 
-/// DuckDuckGo HTML endpoint: `//div[contains(@class,'body')]` items, `h2`
+/// `DuckDuckGo` HTML endpoint: `//div[contains(@class,'body')]` items, `h2`
 /// title, first anchor href, snippet text.
 fn parse_ddg(document: &str, base: &str) -> Vec<Item> {
     let html = Html::parse_document(document);
@@ -321,8 +325,7 @@ fn parse_ddg(document: &str, base: &str) -> Vec<Item> {
         let description = item
             .select(&snippets)
             .next()
-            .map(|element| collapse(&element))
-            .unwrap_or_else(|| collapse(&anchor));
+            .map_or_else(|| collapse(&anchor), |element| collapse(&element));
         if title.is_empty() || description.is_empty() {
             continue;
         }
@@ -397,7 +400,7 @@ fn result_url(href: &str, base: &str) -> Option<String> {
     normalize_url(&resolve(base, &target)).ok()
 }
 
-/// DuckDuckGo wraps results in `/l/?uddg=<encoded target>`; recover the target.
+/// `DuckDuckGo` wraps results in `/l/?uddg=<encoded target>`; recover the target.
 fn decode_uddg(href: &str) -> Option<String> {
     let marker = "uddg=";
     let start = href.find(marker)? + marker.len();
@@ -439,7 +442,7 @@ fn percent_decode(input: &str) -> String {
     String::from_utf8_lossy(&output).into_owned()
 }
 
-fn hex_value(byte: u8) -> Option<u8> {
+const fn hex_value(byte: u8) -> Option<u8> {
     match byte {
         b'0'..=b'9' => Some(byte - b'0'),
         b'a'..=b'f' => Some(byte - b'a' + 10),
@@ -570,7 +573,10 @@ mod tests {
         assert!(query.engine == Engine::Brave);
         let defaults = Query::parse(&json!({"query": "rust"})).expect("valid query");
         assert!(defaults.engine == Engine::Auto);
-        assert_eq!(defaults.limit, DEFAULT_LIMIT as usize);
+        assert_eq!(
+            defaults.limit,
+            usize::try_from(DEFAULT_LIMIT).expect("positive default")
+        );
         assert_eq!(
             defaults.timeout,
             Duration::from_millis(DEFAULT_TIMEOUT_MS as u64)

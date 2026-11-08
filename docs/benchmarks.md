@@ -60,15 +60,16 @@ times, not public-site latency or throughput guarantees.
 ## Bounded JSON size accounting
 
 The JSON budget helper is `serialized_size_within` in `rust/src/json.rs`, ported
-from the former C++ test suite. It serializes with the real serializer, compares
-the byte count to the limit, and returns `None` when the limit is exceeded. It is
-covered by `cargo test` across null/booleans/integers/unsigned maximum/floats/
-non-finite values/escaped UTF-8/arrays/objects/nested values and 256 KiB and 4 MiB
-payloads, at exact-size, size+1, size−1, zero, and `usize::MAX` limits.
+from the former C++ test suite. It walks the value with a counting writer that
+fails as soon as the limit is exceeded, so measuring a page allocates no
+page-sized string. It is covered by `cargo test` across
+null/booleans/integers/unsigned maximum/floats/non-finite values/escaped
+UTF-8/arrays/objects/nested values and 256 KiB and 4 MiB payloads, at exact-size,
+size+1, size−1, zero, and `usize::MAX` limits.
 
-The crate serializes a full page to measure it, so the historical C++ microbenchmark
-(`json_test --benchmark`, bounded counting versus `dump().size()`) no longer
-applies. Crawl keeps the same 4 MiB budget semantics.
+The historical C++ build instead serialized the page to count it (or used a
+bounded counting stream in a separate microbenchmark). Crawl keeps the same
+4 MiB budget semantics.
 
 ## Readiness scan CPU (historical)
 

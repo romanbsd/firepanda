@@ -54,26 +54,47 @@ pub fn parse_line(input: &[u8]) -> Result<serde_json::Value, ParseError> {
 
 /// Exact JSON integer (i64 or u64 storage), as `nlohmann::is_number_integer`
 /// sees it: floats and booleans do not qualify. Returned as i128 so values
-/// above i64::MAX never wrap during range comparisons.
+/// above `i64::MAX` never wrap during range comparisons.
 pub fn as_integer(value: &serde_json::Value) -> Option<i128> {
     let Value::Number(number) = value else {
         return None;
     };
     if let Some(unsigned) = number.as_u64() {
-        return Some(unsigned as i128);
+        return Some(i128::from(unsigned));
     }
-    number.as_i64().map(|signed| signed as i128)
+    number.as_i64().map(i128::from)
 }
 
 /// Serialized size of `value` when it fits in `limit` bytes, else `None`.
-/// Uses the same compact serializer as the final tool result, so the crawl's
-/// 4 MiB budget matches what the client would receive. Rust's `Value` cannot
-/// hold invalid UTF-8 (the C++ `dump()` type_error case), so the serializer
-/// is infallible here; the error arm stays as a defensive mapping to
-/// "budget unavailable".
+/// Counts serializer output directly, so measuring a page never allocates a
+/// page-sized string and stops as soon as the limit is exceeded. Uses the same
+/// compact serializer as the final tool result, so the crawl's 4 MiB budget
+/// matches what the client would receive. Rust's `Value` cannot hold invalid
+/// UTF-8, so the serializer itself cannot fail; a write error only means the
+/// budget was reached.
 pub fn serialized_size_within(value: &Value, limit: usize) -> Option<usize> {
-    let size = serde_json::to_string(value).ok()?.len();
-    (size <= limit).then_some(size)
+    let mut writer = CountingWriter { written: 0, limit };
+    serde_json::to_writer(&mut writer, value).ok()?;
+    Some(writer.written)
+}
+
+struct CountingWriter {
+    written: usize,
+    limit: usize,
+}
+
+impl std::io::Write for CountingWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.written = self.written.saturating_add(bytes.len());
+        if self.written > self.limit {
+            return Err(std::io::Error::other("serialized size limit exceeded"));
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -102,7 +123,7 @@ mod tests {
         assert_eq!(as_integer(&json!(-1)), Some(-1));
         assert_eq!(as_integer(&json!(0)), Some(0));
         assert_eq!(as_integer(&json!(2_u64.pow(63))), Some(1 << 63));
-        assert_eq!(as_integer(&json!(u64::MAX)), Some(u64::MAX as i128));
+        assert_eq!(as_integer(&json!(u64::MAX)), Some(i128::from(u64::MAX)));
         assert_eq!(as_integer(&json!(1.5)), None);
         assert_eq!(as_integer(&json!(true)), None);
         // 2^64 overflows integer parsing and lands in float storage — the same
@@ -113,18 +134,18 @@ mod tests {
         assert!(parse_line(b"").is_err());
     }
 
-    /// Port of the historical JSON size-boundary suite: every limit boundary around the exact
-    /// serialized size, for the same value zoo the C++ suite walks.
-    fn check(value: serde_json::Value) {
-        let expected = serde_json::to_string(&value).unwrap().len();
-        assert_eq!(serialized_size_within(&value, expected), Some(expected));
-        assert_eq!(serialized_size_within(&value, expected + 1), Some(expected));
+    /// Port of the historical JSON size-boundary suite: every limit boundary
+    /// around the exact serialized size, for the same value zoo the C++ suite walks.
+    fn check(value: &serde_json::Value) {
+        let expected = serde_json::to_string(value).unwrap().len();
+        assert_eq!(serialized_size_within(value, expected), Some(expected));
+        assert_eq!(serialized_size_within(value, expected + 1), Some(expected));
         assert_eq!(
-            serialized_size_within(&value, expected.saturating_sub(1)),
+            serialized_size_within(value, expected.saturating_sub(1)),
             None
         );
-        assert_eq!(serialized_size_within(&value, 0), None);
-        assert_eq!(serialized_size_within(&value, usize::MAX), Some(expected));
+        assert_eq!(serialized_size_within(value, 0), None);
+        assert_eq!(serialized_size_within(value, usize::MAX), Some(expected));
     }
 
     #[test]
@@ -149,11 +170,11 @@ mod tests {
             json!({}),
             json!({"nested": [1, "two", Value::Null, [true, false]]}),
         ] {
-            check(value);
+            check(&value);
         }
-        check(json!({"text": "\n".repeat(256 * 1024)}));
-        check(json!({"text": "x".repeat(4 * 1024 * 1024)}));
-        // The C++ suite's invalid-UTF-8 dump() error has no Rust equivalent:
+        check(&json!({"text": "\n".repeat(256 * 1024)}));
+        check(&json!({"text": "x".repeat(4 * 1024 * 1024)}));
+        // The C++ suite's invalid-UTF-8 `dump()` error has no Rust equivalent:
         // Value::String is UTF-8 by construction, and serialization of a
         // Value cannot fail.
         assert_eq!(

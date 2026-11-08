@@ -40,12 +40,11 @@ pub fn parse() -> Options {
                     eprintln!("Unknown or incomplete option: {arg}");
                     std::process::exit(2);
                 };
-                match parse_idle_timeout(&value) {
-                    Some(seconds) => options.idle_timeout = Duration::from_secs(seconds),
-                    None => {
-                        eprintln!("--idle-timeout must be an integer from 0 to 86400 seconds");
-                        std::process::exit(2);
-                    }
+                if let Some(seconds) = parse_idle_timeout(&value) {
+                    options.idle_timeout = Duration::from_secs(seconds);
+                } else {
+                    eprintln!("--idle-timeout must be an integer from 0 to 86400 seconds");
+                    std::process::exit(2);
                 }
             }
             "--lightpanda" | "--socket" => {
