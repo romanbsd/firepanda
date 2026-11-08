@@ -48,8 +48,9 @@ static TOOL_TABLE: &[ToolDef] = &[
         id: Tool::Scrape,
         name: "scrape",
         title: "Scrape page",
-        description: "Render a page with native Lightpanda and extract content. Markdown \
-                      supports common article elements.",
+        description: "Fetch one page or document (HTML, Markdown, plain text, or a JSON \
+                      endpoint) and extract the requested formats. Use crawl or map for \
+                      multiple pages.",
     },
     ToolDef {
         id: Tool::Crawl,

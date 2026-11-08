@@ -79,6 +79,13 @@ try:
     assert "warnings" not in tool("scrape", url=url + "/ordinary-article")
     empty = tool("scrape", url=url + "/empty")
     assert [w["code"] for w in empty["warnings"]] == ["empty_content"], empty
+    # Single non-HTML resources: text preserves the document body; markdown
+    # renders a preformatted body inside a code fence.
+    data = tool("scrape", url=url + "/data.json", formats=["text", "markdown"])
+    assert data["text"] == '{"ok": true, "items": [1, 2, 3], "nested": {"a": "b"}}', data
+    assert data["markdown"].strip().startswith("```") and '"items"' in data["markdown"], data
+    doc = tool("scrape", url=url + "/doc.md", formats=["text"])
+    assert doc["text"] == "# Doc title\n\nMarkdown body.", doc
     warning_map = tool("map", url=url + "/http-error", limit=1, maxDepth=0)
     assert warning_map["warnings"][0]["warnings"][-1]["code"] == "http_error", warning_map
     warning_crawl = tool("crawl", url=url + "/http-error", limit=1, maxDepth=0)

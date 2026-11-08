@@ -38,6 +38,12 @@ Implemented arguments:
 | `waitForSelector` | — | Firepanda addition: wait for CSS-selector presence |
 | `waitForText` | — | Firepanda addition: wait for literal body text |
 
+Use `scrape` for a single resource of any content type. A Markdown file or JSON
+endpoint is rendered by Lightpanda as a preformatted document: `formats: ["text"]`
+returns the body unchanged, while `markdown` wraps it in a code fence. There is no
+JSON-parsing format; agents that need structured data should parse the `text`
+payload themselves.
+
 Not implemented: object-form formats (`json`, `summary`, `screenshot`, …),
 `includeTags`/`excludeTags`, `headers`, `actions`, `location`, `proxy`, caching
 options, and LLM-based cleaning.

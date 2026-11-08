@@ -8,6 +8,7 @@ class Fixture(http.server.BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
+        content_type = "text/html"
         if self.path == "/redirect":
             self.send_response(302)
             self.send_header("Location", "/two")
@@ -122,6 +123,12 @@ class Fixture(http.server.BaseHTTPRequestHandler):
         elif self.path in ('/budget-root', '/budget-leaf'):
             body = ('<html><main>' + 'x' * (2 * 1024 * 1024) +
                     '<a href="/budget-leaf">Next</a></main></html>').encode()
+        elif self.path == "/data.json":
+            body = b'{"ok": true, "items": [1, 2, 3], "nested": {"a": "b"}}'
+            content_type = "application/json"
+        elif self.path == "/doc.md":
+            body = b"# Doc title\n\nMarkdown body.\n"
+            content_type = "text/markdown; charset=utf-8"
         elif self.path in ("/links-exact", "/links-overflow"):
             count = 10000 if self.path == "/links-exact" else 10001
             body = ("<html><title>Links</title><main>" +
@@ -138,7 +145,7 @@ class Fixture(http.server.BaseHTTPRequestHandler):
                     "<script>document.getElementById('dynamic').textContent='Rendered by JavaScript';</script>"
                     "</main></body></html>").encode()
         self.send_response(503 if self.path == "/http-error" else 200)
-        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         try:

@@ -109,6 +109,14 @@ Scrape one page:
 {"url":"https://example.com","formats":["markdown","text","links"]}
 ```
 
+Fetch a single non-HTML resource. `text` returns the document body as-is;
+`markdown` renders preformatted bodies (Markdown files, JSON) inside a code fence:
+
+```json
+{"url":"https://example.com/README.md","formats":["text"]}
+{"url":"https://api.example.com/data.json","formats":["text"]}
+```
+
 Wait for JavaScript-generated content:
 
 ```json
