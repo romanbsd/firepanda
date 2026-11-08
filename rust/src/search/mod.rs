@@ -12,11 +12,11 @@
 //! engine endpoints; the offline fixture tests use them to point at a local
 //! server instead of the network.
 
+use crate::http;
 use crate::json::as_integer;
 use crate::tools::normalize_url;
 use scraper::{ElementRef, Html, Selector};
 use serde_json::{Value, json};
-use std::sync::OnceLock;
 use std::time::Duration;
 
 const DEFAULT_LIMIT: i64 = 5;
@@ -212,31 +212,14 @@ fn endpoint(override_name: &str, default_url: &str) -> String {
         .unwrap_or_else(|| default_url.to_string())
 }
 
-fn client() -> Result<&'static primp::Client, String> {
-    static CLIENT: OnceLock<Result<primp::Client, String>> = OnceLock::new();
-    CLIENT
-        .get_or_init(|| {
-            primp::Client::builder()
-                .impersonate(primp::Impersonate::ChromeV146)
-                // Backstop only: each attempt is bounded by the remaining
-                // tool budget, which may be the full 60-second maximum.
-                .timeout(Duration::from_millis(
-                    u64::try_from(MAX_TIMEOUT_MS).expect("positive timeout bound"),
-                ))
-                .build()
-                .map_err(|error| format!("Search client failed: {}", error.without_url()))
-        })
-        .as_ref()
-        .map_err(Clone::clone)
-}
-
 async fn search_engine(
     engine: Engine,
     base: &str,
     query: &str,
     timeout: Duration,
 ) -> Result<Vec<Item>, String> {
-    let client = client()?;
+    let client = http::client()?;
+    let deadline = tokio::time::Instant::now() + timeout;
     let request = match engine {
         // GET keeps the HTML endpoint from serving a cookie challenge.
         Engine::DuckDuckGo => client
@@ -244,7 +227,7 @@ async fn search_engine(
             .query(&[("q", query), ("b", ""), ("l", "us-en")]),
         Engine::Brave => client.get(base).query(&[("q", query), ("source", "web")]),
     };
-    let response = tokio::time::timeout(timeout, request.send())
+    let response = tokio::time::timeout_at(deadline, request.send())
         .await
         .map_err(|_| "Search request timed out".to_string())?
         .map_err(|error| format!("Search request failed: {}", error.without_url()))?;
@@ -252,50 +235,15 @@ async fn search_engine(
     if !status.is_success() {
         return Err(format!("Search engine returned HTTP {status}"));
     }
-    let body = read_body(response).await?;
+    let body = http::text_or_lossy(
+        http::read_limited(response, MAX_BODY_BYTES, deadline)
+            .await
+            .map_err(|error| error.replace("HTTP response", "Search response"))?,
+    );
     Ok(match engine {
         Engine::DuckDuckGo => parse_ddg(&body, base),
         Engine::Brave => parse_brave(&body, base),
     })
-}
-
-/// Read an engine page with a hard size cap. Engine pages are UTF-8; a
-/// lossy decode only matters for malformed responses that fail parsing anyway.
-async fn read_body(mut response: primp::Response) -> Result<String, String> {
-    let declared = response.content_length();
-    if declared.is_some_and(|length| length > u64::try_from(MAX_BODY_BYTES).unwrap_or(u64::MAX)) {
-        return Err(body_too_large());
-    }
-    let expected = usize::try_from(declared.unwrap_or(0))
-        .unwrap_or(MAX_BODY_BYTES)
-        .min(MAX_BODY_BYTES);
-    let mut body = Vec::with_capacity(expected);
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|error| format!("Search response failed: {}", error.without_url()))?
-    {
-        if chunk.len() > MAX_BODY_BYTES - body.len() {
-            return Err(body_too_large());
-        }
-        body.extend_from_slice(&chunk);
-    }
-    Ok(text_or_lossy(body))
-}
-
-fn body_too_large() -> String {
-    format!(
-        "Search response exceeds {} MiB",
-        MAX_BODY_BYTES / (1024 * 1024)
-    )
-}
-
-/// UTF-8 is the normal case; a lossy decode only matters for malformed pages.
-fn text_or_lossy(bytes: Vec<u8>) -> String {
-    match String::from_utf8(bytes) {
-        Ok(text) => text,
-        Err(error) => String::from_utf8_lossy(error.as_bytes()).into_owned(),
-    }
 }
 
 struct Item {
@@ -486,7 +434,7 @@ fn percent_decode(input: &str) -> String {
             }
         }
     }
-    text_or_lossy(output)
+    http::text_or_lossy(output)
 }
 
 const fn hex_value(byte: u8) -> Option<u8> {

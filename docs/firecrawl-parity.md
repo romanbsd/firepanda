@@ -22,7 +22,19 @@ Invalid arguments return JSON-RPC `-32602`; browser/network failures return an
 
 `map` rejects `formats` and `onlyMainContent`: it always extracts links, so those
 projection options would be no-ops. `scrape` rejects discovery options
-(`limit`, `maxDepth`, `maxConcurrency`).
+(`limit`, `maxDepth`, `maxConcurrency`). `fetch` accepts only `url` and `timeout`.
+
+## fetch
+
+Firepanda extension: no Firecrawl counterpart. Fetches a raw non-HTML resource
+over HTTP without starting the browser.
+
+Arguments: `url` and `timeout` (100–120000 ms). Response:
+`{url, sourceURL, statusCode, contentType, size, encoding, text|base64}`.
+`encoding` is `text` for JSON, Markdown, XML, CSV, SVG, and other text types;
+unknown/`application/octet-stream` bodies are sniffed as UTF-8, otherwise returned
+as base64. `text/html` and XHTML are rejected with a pointer to `scrape`. Redirects
+are followed and `url` is the final URL. Bodies are capped at 4 MiB.
 
 ## scrape
 
@@ -38,11 +50,11 @@ Implemented arguments:
 | `waitForSelector` | — | Firepanda addition: wait for CSS-selector presence |
 | `waitForText` | — | Firepanda addition: wait for literal body text |
 
-Use `scrape` for a single resource of any content type. A Markdown file or JSON
-endpoint is rendered by Lightpanda as a preformatted document: `formats: ["text"]`
-returns the body unchanged, while `markdown` wraps it in a code fence. There is no
-JSON-parsing format; agents that need structured data should parse the `text`
-payload themselves.
+Use `fetch` for a single non-HTML resource of any content type: JSON, Markdown,
+XML, CSV, text, SVG, and images. It bypasses the browser entirely. `scrape` also
+renders a preformatted Markdown/JSON document through Lightpanda (as a code
+fence), but `fetch` is the fast path and returns text verbatim or binary as
+base64.
 
 Not implemented: object-form formats (`json`, `summary`, `screenshot`, …),
 `includeTags`/`excludeTags`, `headers`, `actions`, `location`, `proxy`, caching

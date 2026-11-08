@@ -1,8 +1,9 @@
 # Native service decisions
 
 Firepanda is a Rust (edition 2024, Tokio) MCP stdio service for macOS and Linux.
-Its tools are `scrape`, `crawl`, `map`, and — in `--features search` builds —
-`search`. The executable does not invoke Node, Docker, or an intermediate HTTP API.
+Its core tools are `fetch`, `scrape`, `crawl`, and `map`; `--features search`
+adds `search`. The executable does not invoke Node, Docker, or an intermediate
+HTTP API.
 
 ## Communication
 
@@ -29,6 +30,8 @@ signals the child PID it created; an external browser is never terminated.
 | `rust/src/browser/mod.rs` | process lifecycle, connection pool, idle bookkeeping, shutdown |
 | `rust/src/browser/cdp.rs` | deadline-bounded CDP connection, scrape pipeline, validation |
 | `rust/src/browser/extract.js` | in-page extractor (embedded with `include_str!`) |
+| `rust/src/http.rs` | shared browser-impersonated HTTP client, deadline-bounded body reader |
+| `rust/src/tools/fetch.rs` | raw JSON/Markdown/XML/image fetch without the browser |
 | `rust/src/search/mod.rs` | feature-gated keyless search (primp + scraper) |
 
 ## Concurrency and lifecycle
@@ -65,22 +68,34 @@ JSON-RPC error (`-32602`); browser or extraction failures are MCP tool results w
 `isError` and no `structuredContent`.
 
 Input is capped at 1 MiB per line before parsing and 64 levels of JSON nesting on
-both MCP and CDP paths. WebSocket messages are capped at 16 MiB. Tool results are
-capped at 8 MiB; results above 1 MiB omit the duplicate structured field. Text and
-structured results are duplicated on the wire below that threshold for client
-compatibility. The link cap is defined once in `tools.rs` and passed into the
-extractor. Option definitions feed both validation and JSON schemas.
+both MCP and CDP paths. WebSocket messages are capped at 16 MiB. Fetch bodies are
+capped at 4 MiB raw and search bodies at 8 MiB. Tool results are capped at 8 MiB;
+results above 1 MiB omit the duplicate structured field. Text and structured
+results are duplicated on the wire below that threshold for client compatibility.
+The link cap is defined once in `tools.rs` and passed into the extractor. Option
+definitions feed both validation and JSON schemas, including per-tool applicability.
+
+## Fetch shortcut
+
+`fetch` bypasses Lightpanda for resources that do not need rendering. A shared
+primp client (Chrome impersonation, connection pooling) performs the request under
+the tool deadline and reads the body in chunks up to 4 MiB. JSON, Markdown, XML,
+text, CSV, SVG, and unknown UTF-8 bodies return as `text`; other media types return
+base64. `text/html` and XHTML are rejected with a pointer to `scrape`, so a fetch
+never starts the managed browser. Redirects are followed. Responses keep their
+status code and body (including 4xx/5xx), matching an HTTP client rather than a
+scraper.
 
 ## Search (feature-gated)
 
-`--features search` adds primp (browser impersonation) and scraper (CSS parsing) as
-optional dependencies so the parity build stays small and the browser gates never
-depend on network search. The recipes follow `ddgs`: DuckDuckGo's HTML endpoint via
-GET (its form POST is answered with a cookie challenge from non-browser clients),
-and Brave's `data-type="web"` result blocks. DuckDuckGo redirect wrappers
-(`/l/?uddg=...`) are decoded, ad redirects (`y.js`) are dropped, and results are
-deduplicated by normalized URL. `auto` tries DuckDuckGo, then Brave; network/HTTP
-failures and empty result sets fall through, all under one total timeout.
+`--features search` adds scraper (CSS parsing) and url as optional dependencies;
+primp is core and shared with `fetch`. The recipes follow `ddgs`: DuckDuckGo's HTML
+endpoint via GET (its form POST is answered with a cookie challenge from
+non-browser clients), and Brave's `data-type="web"` result blocks. DuckDuckGo
+redirect wrappers (`/l/?uddg=...`) are decoded, ad redirects (`y.js`) are dropped,
+and results are deduplicated by normalized URL. `auto` tries DuckDuckGo, then
+Brave; network/HTTP failures and empty result sets fall through, all under one
+total timeout.
 
 The response is Firecrawl v2 shaped (`{"success": true, "data": {"web": [...]}}`).
 Engine bodies are capped at 8 MiB and each attempt runs under the remaining tool
@@ -107,8 +122,11 @@ reading a fragment stream.
 `tests/memory.py` repeats 100 browsing cycles, large outputs, and failure recovery
 and checks that the descriptor count is flat.
 `tests/search.py` covers the offline search fixtures.
+`tests/fetch.py` covers raw JSON/Markdown/XML/image fetch, redirects, HTTP errors,
+timeouts, the body cap, and asserts that no browser child is spawned.
 `cargo test` ports the JSON size-boundary suite and covers URL normalization,
-schemas, MCP negotiation, browser pool/ownership, and search parsing.
+schemas, MCP negotiation, browser pool/ownership, fetch classification, and search
+parsing.
 
 CI runs the default parity suite and the search suite on macOS and Linux. Release
 packaging is verified by running `scripts/package-release.py` on the built binary.

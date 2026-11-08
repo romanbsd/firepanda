@@ -3,6 +3,7 @@
 //! same static tables.
 
 mod crawl;
+mod fetch;
 
 use crate::browser::{Browser, Format, PageRequest};
 use crate::json::as_integer;
@@ -17,12 +18,34 @@ const MAX_CRAWL_BYTES: usize = 4 * 1024 * 1024;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
     Scrape,
+    Fetch,
     Crawl,
     Map,
     /// Keyless web search; only present in `--features search` builds.
     #[cfg(feature = "search")]
     Search,
 }
+
+impl Tool {
+    /// Applicability bit used by the option table.
+    const fn bit(self) -> u8 {
+        match self {
+            Self::Scrape => SCRAPE,
+            Self::Fetch => FETCH,
+            Self::Crawl => CRAWL,
+            Self::Map => MAP,
+            #[cfg(feature = "search")]
+            Self::Search => SEARCH,
+        }
+    }
+}
+
+const SCRAPE: u8 = 1 << 0;
+const FETCH: u8 = 1 << 1;
+const CRAWL: u8 = 1 << 2;
+const MAP: u8 = 1 << 3;
+#[cfg(feature = "search")]
+const SEARCH: u8 = 1 << 4;
 
 struct ToolDef {
     id: Tool,
@@ -51,6 +74,14 @@ static TOOL_TABLE: &[ToolDef] = &[
         description: "Fetch one page or document (HTML, Markdown, plain text, or a JSON \
                       endpoint) and extract the requested formats. Use crawl or map for \
                       multiple pages.",
+    },
+    ToolDef {
+        id: Tool::Fetch,
+        name: "fetch",
+        title: "Fetch resource",
+        description: "Fetch one raw non-HTML resource over HTTP without starting the browser: \
+                      JSON, Markdown, XML, plain text, images, and other files. Use scrape for \
+                      rendered HTML.",
     },
     ToolDef {
         id: Tool::Crawl,
@@ -95,14 +126,12 @@ struct OptionDef {
     minimum: i64,
     /// Integer maximum or string byte limit.
     maximum: i64,
-    /// Accepted by crawl/map; rejected by scrape.
-    discovery_only: bool,
-    /// Ignored by map, which always extracts links only; rejected there.
-    map_ignored: bool,
+    /// Tools accepting this argument (bitmask from `Tool::bit`).
+    applies: u8,
 }
 
 macro_rules! opt {
-    ($name:literal, $kind:expr, $description:literal) => {
+    ($name:literal, $kind:expr, $description:literal, tools = $tools:expr) => {
         OptionDef {
             name: $name,
             kind: $kind,
@@ -110,11 +139,10 @@ macro_rules! opt {
             fallback: 0,
             minimum: 0,
             maximum: 0,
-            discovery_only: false,
-            map_ignored: false,
+            applies: $tools,
         }
     };
-    ($name:literal, $kind:expr, $description:literal, fallback = $fallback:expr, minimum = $minimum:expr, maximum = $maximum:expr) => {
+    ($name:literal, $kind:expr, $description:literal, tools = $tools:expr, fallback = $fallback:expr, minimum = $minimum:expr, maximum = $maximum:expr) => {
         OptionDef {
             name: $name,
             kind: $kind,
@@ -122,8 +150,7 @@ macro_rules! opt {
             fallback: $fallback,
             minimum: $minimum,
             maximum: $maximum,
-            discovery_only: false,
-            map_ignored: false,
+            applies: $tools,
         }
     };
 }
@@ -132,32 +159,29 @@ const OPTIONS: [OptionDef; 10] = [
     opt!(
         "url",
         OptionKind::Url,
-        "Absolute HTTP(S) URL without credentials"
+        "Absolute HTTP(S) URL without credentials",
+        tools = SCRAPE | CRAWL | MAP | FETCH
     ),
-    OptionDef {
-        name: "formats",
-        kind: OptionKind::Formats,
-        description: "Output formats to extract",
-        fallback: 0,
-        minimum: 0,
-        maximum: 0,
-        discovery_only: false,
-        map_ignored: true,
-    },
-    OptionDef {
-        name: "onlyMainContent",
-        kind: OptionKind::Boolean,
-        description: "Remove common page chrome and prefer main/article content",
-        fallback: 1,
-        minimum: 0,
-        maximum: 0,
-        discovery_only: false,
-        map_ignored: true,
-    },
+    opt!(
+        "formats",
+        OptionKind::Formats,
+        "Output formats to extract",
+        tools = SCRAPE | CRAWL
+    ),
+    opt!(
+        "onlyMainContent",
+        OptionKind::Boolean,
+        "Remove common page chrome and prefer main/article content",
+        tools = SCRAPE | CRAWL,
+        fallback = 1,
+        minimum = 0,
+        maximum = 0
+    ),
     opt!(
         "timeout",
         OptionKind::Integer,
-        "Total per-page budget in milliseconds, including navigation and extraction",
+        "Total request budget in milliseconds",
+        tools = SCRAPE | CRAWL | MAP | FETCH,
         fallback = 30000,
         minimum = 100,
         maximum = 120_000
@@ -166,6 +190,7 @@ const OPTIONS: [OptionDef; 10] = [
         "waitFor",
         OptionKind::Integer,
         "Extra wait after page load, within timeout",
+        tools = SCRAPE | CRAWL | MAP,
         fallback = 0,
         minimum = 0,
         maximum = 30000
@@ -174,6 +199,7 @@ const OPTIONS: [OptionDef; 10] = [
         "waitForSelector",
         OptionKind::String,
         "Wait for a CSS selector to match an element (presence, not visibility), within timeout.",
+        tools = SCRAPE | CRAWL | MAP,
         fallback = 0,
         minimum = 0,
         maximum = 2048
@@ -182,40 +208,38 @@ const OPTIONS: [OptionDef; 10] = [
         "waitForText",
         OptionKind::String,
         "Wait for literal case-sensitive body text outside scripts/styles/templates, within timeout.",
+        tools = SCRAPE | CRAWL | MAP,
         fallback = 0,
         minimum = 0,
         maximum = 4096
     ),
-    OptionDef {
-        name: "limit",
-        kind: OptionKind::Integer,
-        description: "Maximum pages to attempt",
-        fallback: 10,
-        minimum: 1,
-        maximum: 100,
-        discovery_only: true,
-        map_ignored: false,
-    },
-    OptionDef {
-        name: "maxDepth",
-        kind: OptionKind::Integer,
-        description: "Maximum link depth from the start URL",
-        fallback: 1,
-        minimum: 0,
-        maximum: 5,
-        discovery_only: true,
-        map_ignored: false,
-    },
-    OptionDef {
-        name: "maxConcurrency",
-        kind: OptionKind::Integer,
-        description: "Pages fetched in flight at once during this crawl",
-        fallback: 4,
-        minimum: 1,
-        maximum: 16,
-        discovery_only: true,
-        map_ignored: false,
-    },
+    opt!(
+        "limit",
+        OptionKind::Integer,
+        "Maximum pages to attempt",
+        tools = CRAWL | MAP,
+        fallback = 10,
+        minimum = 1,
+        maximum = 100
+    ),
+    opt!(
+        "maxDepth",
+        OptionKind::Integer,
+        "Maximum link depth from the start URL",
+        tools = CRAWL | MAP,
+        fallback = 1,
+        minimum = 0,
+        maximum = 5
+    ),
+    opt!(
+        "maxConcurrency",
+        OptionKind::Integer,
+        "Pages fetched in flight at once during this crawl",
+        tools = CRAWL | MAP,
+        fallback = 4,
+        minimum = 1,
+        maximum = 16
+    ),
 ];
 
 fn find_option(name: &str) -> Option<&'static OptionDef> {
@@ -439,9 +463,7 @@ pub fn parse_request(args: &Value, tool: Tool) -> Result<PageRequest, String> {
         let Some(known) = find_option(key) else {
             return Err(format!("Unknown argument: {key}"));
         };
-        if (known.discovery_only && tool == Tool::Scrape)
-            || (known.map_ignored && tool == Tool::Map)
-        {
+        if known.applies & tool.bit() == 0 {
             return Err(format!("Unknown argument: {key}"));
         }
     }
@@ -496,9 +518,7 @@ pub fn tools_list() -> Value {
                 }
                 let mut properties = serde_json::Map::new();
                 for option in &OPTIONS {
-                    let inapplicable = (option.discovery_only && entry.id == Tool::Scrape)
-                        || (option.map_ignored && entry.id == Tool::Map);
-                    if inapplicable {
+                    if option.applies & entry.id.bit() == 0 {
                         continue;
                     }
                     properties.insert(option.name.to_string(), schema_of(option));
@@ -531,6 +551,10 @@ pub enum CallError {
 
 pub async fn execute(browser: &Browser, name: &str, args: &Value) -> Result<Value, CallError> {
     let tool = parse_tool(name).map_err(CallError::Invalid)?;
+    if tool == Tool::Fetch {
+        let request = fetch::Request::parse(args).map_err(CallError::Invalid)?;
+        return fetch::run(&request).await.map_err(CallError::Tool);
+    }
     // Search takes its own arguments (no URL), so it bypasses parse_request.
     #[cfg(feature = "search")]
     if tool == Tool::Search {
@@ -644,14 +668,14 @@ mod tests {
     fn schema_shape() {
         let list = tools_list();
         let tools = list.as_array().unwrap();
-        assert_eq!(tools.len(), if cfg!(feature = "search") { 4 } else { 3 });
+        assert_eq!(tools.len(), if cfg!(feature = "search") { 5 } else { 4 });
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(
             names,
             if cfg!(feature = "search") {
-                &["scrape", "crawl", "map", "search"][..]
+                &["scrape", "fetch", "crawl", "map", "search"][..]
             } else {
-                &["scrape", "crawl", "map"][..]
+                &["scrape", "fetch", "crawl", "map"][..]
             }
         );
         for tool in tools {
@@ -666,13 +690,24 @@ mod tests {
                 continue;
             }
             let properties = &tool["inputSchema"]["properties"];
+            if tool["name"] == "fetch" {
+                assert_eq!(tool["inputSchema"]["required"], json!(["url"]));
+                let map = properties.as_object().expect("object schema");
+                assert_eq!(map.len(), 2);
+                assert!(map.contains_key("url") && map.contains_key("timeout"));
+                assert_eq!(tool["title"], "Fetch resource");
+                continue;
+            }
             for name in ["waitForSelector", "waitForText"] {
                 assert_eq!(properties[name]["type"], "string");
                 assert_eq!(properties[name]["minLength"], 1);
             }
             let has_concurrency = properties.get("maxConcurrency").is_some();
-            assert_eq!(has_concurrency, tool["name"] != "scrape");
-            if tool["name"] != "scrape" {
+            assert_eq!(
+                has_concurrency,
+                tool["name"] == "crawl" || tool["name"] == "map"
+            );
+            if has_concurrency {
                 assert_eq!(properties["maxConcurrency"]["default"], 4);
                 assert_eq!(properties["maxConcurrency"]["minimum"], 1);
                 assert_eq!(properties["maxConcurrency"]["maximum"], 16);

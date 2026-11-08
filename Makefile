@@ -1,5 +1,5 @@
 # Firepanda: Rust MCP stdio service with a managed Lightpanda browser.
-# `build`/`gates` exercise the parity binary (3 tools); `release` adds search.
+# `build`/`gates` exercise the core binary (4 tools); `release` adds search.
 
 CARGO ?= cargo
 MANIFEST ?= rust/Cargo.toml
@@ -29,6 +29,7 @@ check:
 gates: build
 	python3 tests/protocol.py $(BINARY)
 	python3 tests/transport.py $(BINARY)
+	python3 tests/fetch.py $(BINARY) $(LIGHTPANDA)
 	python3 tests/integration.py $(BINARY) $(LIGHTPANDA)
 	python3 tests/memory.py $(BINARY) $(LIGHTPANDA)
 

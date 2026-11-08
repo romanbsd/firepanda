@@ -47,7 +47,7 @@ with tempfile.TemporaryFile(mode="w+") as diagnostics:
         baseline_descriptors = None
         for i in range(args.iterations):
             # 3 tools in the parity build; 4 when the search feature is on.
-            assert len(service.call("tools/list")["tools"]) in (3, 4)
+            assert len(service.call("tools/list")["tools"]) in (4, 5)
             result = tool("scrape", "/large" if i % 10 == 0 else "/", formats=["markdown", "html", "links"])
             assert not result["isError"], result
             if i % 10 == 0:

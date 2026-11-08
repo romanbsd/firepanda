@@ -272,7 +272,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             response["result"]["tools"].as_array().unwrap().len(),
-            if cfg!(feature = "search") { 4 } else { 3 }
+            if cfg!(feature = "search") { 5 } else { 4 }
         );
     }
 

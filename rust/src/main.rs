@@ -3,6 +3,7 @@
 
 mod browser;
 mod cli;
+mod http;
 mod json;
 mod mcp;
 #[cfg(feature = "search")]

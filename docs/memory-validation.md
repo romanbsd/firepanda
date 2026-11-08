@@ -16,6 +16,7 @@ tests verify its context/process cleanup rather than its internal memory safety.
 | Native browser integration | `make gates` → `tests/integration.py` |
 | 100-cycle memory/descriptor stress | `make gates` → `tests/memory.py` |
 | Offline search fixtures | `make search-gates` → `tests/search.py` |
+| Raw fetch (no browser) | `make gates` → `tests/fetch.py` |
 | Release packaging | `scripts/package-release.py` on the built binary |
 
 The Python suites spawn the binary over stdio and never see Rust internals, so the

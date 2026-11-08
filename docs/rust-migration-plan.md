@@ -1,8 +1,9 @@
 # Rust Migration Plan — firepanda
 
-**Status (2026-11-08): M0–M8 complete on `rust-rewrite`.** The parity binary keeps the
-three original tools; `--features search` adds the fourth. The historical plan below is
-retained for provenance; `docs/native-design.md` and the README describe the shipped code.
+**Status (2026-11-08): M0–M8 complete on `rust-rewrite`.** The core binary keeps the
+three original tools plus a browser-free `fetch`; `--features search` adds the fifth.
+The historical plan below is retained for provenance; `docs/native-design.md` and
+the README describe the shipped code.
 
 Module-by-module plan for rewriting firepanda in Rust, with `primp` for browser impersonation
 (search), mapped to the existing black-box test suite. The Python tests are the parity contract:

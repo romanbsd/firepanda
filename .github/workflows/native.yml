@@ -30,6 +30,8 @@ jobs:
       - name: Adversarial CDP transport gate
         run: python3 tests/transport.py rust/target/release/firepanda
       - run: python3 scripts/install-lightpanda.py --release 1.0.2
+      - name: Raw fetch gate
+        run: python3 tests/fetch.py rust/target/release/firepanda "$PWD/.local/bin/lightpanda"
       - name: Native integration gate
         run: python3 tests/integration.py rust/target/release/firepanda "$PWD/.local/bin/lightpanda"
       - name: Memory and descriptor hygiene gate

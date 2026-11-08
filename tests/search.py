@@ -134,8 +134,8 @@ service = service_for()
 try:
     schema = service.call("tools/list")["tools"]
     names = [tool["name"] for tool in schema]
-    assert names == ["scrape", "crawl", "map", "search"], names
-    search = schema[3]
+    assert names == ["scrape", "fetch", "crawl", "map", "search"], names
+    search = schema[4]
     assert search["inputSchema"]["required"] == ["query"], search
     assert search["title"] == "Search the web", search
     assert search["annotations"]["idempotentHint"] is True, search

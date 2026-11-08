@@ -5,10 +5,13 @@ crawling, discovering links, and searching the web with native
 [Lightpanda](https://lightpanda.io/). Runs locally on macOS and Linux, without
 Docker, Node, Chromium, or libcurl.
 
-Firepanda exposes three browser tools over stdio and talks directly to Lightpanda
-over a persistent CDP WebSocket on a private Unix-domain socket. Lightpanda starts
-lazily, is reused across requests, and stops after 60 seconds of inactivity.
+Firepanda exposes four core tools over stdio: three drive Lightpanda, and one
+fetches raw resources directly over HTTP. A feature-gated search tool adds a
+fifth. Lightpanda starts lazily, is reused across requests, and stops after 60
+seconds of inactivity.
 
+- **fetch**: raw HTTP for JSON, Markdown, XML, text, images, and other simple
+  resources, without starting the browser.
 - **scrape**: rendered Markdown, text, cleaned HTML, raw HTML, and links.
 - **crawl**: bounded, breadth-first traversal of same-origin pages.
 - **map**: anchor-link discovery, including external links without following them.
@@ -33,11 +36,12 @@ cargo build --manifest-path rust/Cargo.toml --release --features search
 ./rust/target/release/firepanda --lightpanda "$PWD/.local/bin/lightpanda"
 ```
 
-Omit `--features search` for the parity build, which advertises exactly the three
-browser tools. `make release` is the same command; `make build` is the parity
-build. `make gates` runs the browser-dependent suites against the parity binary,
-and `make search-gates` runs the offline search suite against a separate
-`rust/target-search` build so the parity binary is never overwritten.
+Omit `--features search` for the core build, which advertises the four tools
+`scrape`, `fetch`, `crawl`, and `map`. `make release` is the same command;
+`make build` is the core build. `make gates` runs the browser-dependent suites
+against the core binary, and `make search-gates` runs the offline search suite
+against a separate `rust/target-search` build so the core binary is never
+overwritten.
 
 The last command waits for MCP JSON-RPC messages on stdin. Stdout is reserved for
 protocol replies; diagnostics go to stderr. It does not open an HTTP port.
@@ -103,18 +107,19 @@ JSONRPC
 
 Pass these argument objects through your MCP client's tool-call interface.
 
-Scrape one page:
+Fetch a single simple resource without starting the browser. `text` returns the
+document body as-is; other media types come back as base64:
+
+```json
+{"url":"https://example.com/README.md"}
+{"url":"https://api.example.com/data.json"}
+{"url":"https://example.com/logo.png"}
+```
+
+Scrape one HTML page:
 
 ```json
 {"url":"https://example.com","formats":["markdown","text","links"]}
-```
-
-Fetch a single non-HTML resource. `text` returns the document body as-is;
-`markdown` renders preformatted bodies (Markdown files, JSON) inside a code fence:
-
-```json
-{"url":"https://example.com/README.md","formats":["text"]}
-{"url":"https://api.example.com/data.json","formats":["text"]}
 ```
 
 Wait for JavaScript-generated content:
@@ -142,6 +147,15 @@ Search the web without an API key using `search` (search-enabled build):
 ```
 
 ### Arguments
+
+`fetch` takes its own minimal argument set:
+
+| Argument | Default | Behavior |
+| --- | --- | --- |
+| `url` | Required | Absolute HTTP(S) URL; credentials are rejected |
+| `timeout` | `30000` | Whole-request budget, 100–120000 ms |
+
+Browser tools (`scrape`, `crawl`, `map`) share:
 
 | Argument | Default | Behavior |
 | --- | --- | --- |
@@ -171,6 +185,13 @@ Choose conditions that also make sense on descendant pages. They do not inspect
 iframe documents, shadow trees, or canvas pixels. There is no network-idle heuristic.
 
 ### Results and errors
+
+`fetch` returns `url` (final after redirects), `sourceURL`, `statusCode`,
+`contentType`, `size`, `encoding`, and either `text` or `base64`. `encoding` is
+`text` for JSON, Markdown, XML, text, CSV, and SVG; unknown/binary media types are
+sniffed (NUL-free UTF-8 becomes text) and otherwise returned as base64. A
+`text/html` response is rejected with a pointer to `scrape`, since the shortcut
+deliberately never starts the browser.
 
 `scrape` returns requested fields plus `metadata` (`url`, `sourceURL`, `title`,
 `description`, and `httpStatus`/`statusCode` when observed). `statusCode` is the
@@ -220,6 +241,9 @@ MCP client ── stdin/stdout ── Firepanda ── CDP WebSocket / Unix sock
 
 - One serialized request stream, one reusable browser connection pool, and a fresh
   browser context per page isolate cookies and page state between operations.
+- `fetch` bypasses the browser entirely: a shared browser-impersonated HTTP client
+  reads JSON, Markdown, XML, text, images, and other files under the tool deadline
+  and a 4 MiB body cap. HTML is rejected and routed to `scrape`.
 - A managed browser uses a private temporary directory (0700) and socket (0600).
   No TCP discovery endpoint, local proxy, or heartbeat thread is needed.
 - Extraction runs in the page and returns only requested formats. Link-only and
@@ -268,6 +292,7 @@ See [design details](docs/native-design.md) for code structure and protocol beha
 | Crawl/map total work | 120 seconds |
 | Crawl/map traversal | 100 attempts, depth 5 maximum |
 | Unique discovery/frontier links | 10000 |
+| Fetch body | 4 MiB raw (base64 output stays under the 8 MiB result cap) |
 | Search results | 20 per call; 60-second budget maximum |
 | Search response body | 8 MiB |
 
@@ -339,6 +364,8 @@ recovery, and checks descriptor hygiene.
 `tests/search.py` serves canned DuckDuckGo/Brave HTML locally and pins redirect
 decoding, ad filtering, deduplication, limits, fallback, and validation without
 network access.
+`tests/fetch.py` serves JSON, Markdown, XML, images, redirects, errors, timeouts,
+and oversized bodies, and asserts that `fetch` never starts Lightpanda.
 
 CI runs the parity suite on macOS and Linux, the search feature suite separately,
 and verifies release packaging. See [contributing and release maintenance](docs/releasing.md).

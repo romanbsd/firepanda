@@ -43,7 +43,7 @@ class Protocol(unittest.TestCase):
             message(7, "ping", _meta={"io.modelcontextprotocol/protocolVersion": "2099-01-01"}),
         ])
         self.assertEqual([x["id"] for x in out], list(range(1, 8)))
-        self.assertEqual({t["name"] for t in out[0]["result"]["tools"]}, {"scrape", "crawl", "map"})
+        self.assertEqual({t["name"] for t in out[0]["result"]["tools"]}, {"scrape", "fetch", "crawl", "map"})
         self.assertEqual(out[0]["result"]["resultType"], "complete")
         self.assertIn(PROTOCOL_VERSION, out[1]["result"]["supportedVersions"])
         self.assertEqual(out[2]["error"]["code"], -32600)
@@ -52,15 +52,18 @@ class Protocol(unittest.TestCase):
         self.assertEqual(out[6]["error"]["code"], -32022)
         for tool in out[0]["result"]["tools"]:
             properties = tool["inputSchema"]["properties"]
-            for name in ("waitForSelector", "waitForText"):
-                self.assertEqual(properties[name]["type"], "string")
-                self.assertEqual(properties[name]["minLength"], 1)
             # Every tool is a read-only, idempotent network reader.
             self.assertTrue(tool.get("title"))
             self.assertEqual(tool["annotations"]["readOnlyHint"], True)
             self.assertEqual(tool["annotations"]["destructiveHint"], False)
             self.assertEqual(tool["annotations"]["idempotentHint"], True)
             self.assertEqual(tool["annotations"]["openWorldHint"], True)
+            if tool["name"] == "fetch":
+                self.assertEqual(set(properties), {"url", "timeout"})
+                continue
+            for name in ("waitForSelector", "waitForText"):
+                self.assertEqual(properties[name]["type"], "string")
+                self.assertEqual(properties[name]["minLength"], 1)
             # Concurrency applies to crawl/map only; scrape stays single-page.
             self.assertEqual("maxConcurrency" in properties, tool["name"] != "scrape")
             if tool["name"] == "map":
