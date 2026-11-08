@@ -1,4 +1,4 @@
-//! Keyless web search, feature-gated behind `--features search`.
+//! Keyless web search through `DuckDuckGo` and Brave HTML endpoints.
 //!
 //! Engine recipes are ported from `ddgs` (`ddgs/engines/duckduckgo.py` and
 //! `brave.py`): primp performs browser-impersonated requests, and `scraper`

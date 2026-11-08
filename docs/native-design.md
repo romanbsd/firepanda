@@ -1,8 +1,7 @@
 # Native service decisions
 
 Firepanda is a Rust (edition 2024, Tokio) MCP stdio service for macOS and Linux.
-Its core tools are `fetch`, `scrape`, `crawl`, and `map`; `--features search`
-adds `search`. The executable does not invoke Node, Docker, or an intermediate
+Its tools are `fetch`, `scrape`, `crawl`, `map`, and `search`. The executable does not invoke Node, Docker, or an intermediate
 HTTP API.
 
 ## Communication
@@ -32,7 +31,7 @@ signals the child PID it created; an external browser is never terminated.
 | `src/browser/extract.js` | in-page extractor (embedded with `include_str!`) |
 | `src/http.rs` | shared browser-impersonated HTTP client, deadline-bounded body reader |
 | `src/tools/fetch.rs` | raw JSON/Markdown/XML/image fetch without the browser |
-| `src/search/mod.rs` | feature-gated keyless search (primp + scraper) |
+| `src/search/mod.rs` | keyless search (primp + scraper) |
 
 ## Concurrency and lifecycle
 
@@ -110,10 +109,10 @@ repeated fetches and searches reuse connections. The CDP WebSocket is separate:
 it is an HTTP/1.1 Upgrade over the Unix socket (no HTTP/2 extended CONNECT) with
 16 MiB message, frame, and write-buffer caps.
 
-## Search (feature-gated)
+## Search
 
-`--features search` adds scraper (CSS parsing) and url as optional dependencies;
-primp is core and shared with `fetch`. The recipes follow `ddgs`: DuckDuckGo's HTML
+scraper (CSS parsing) and url are core dependencies, and primp is shared with
+`fetch`. The recipes follow `ddgs`: DuckDuckGo's HTML
 endpoint via GET (its form POST is answered with a cookie challenge from
 non-browser clients), and Brave's `data-type="web"` result blocks. DuckDuckGo
 redirect wrappers (`/l/?uddg=...`) are decoded, ad redirects (`y.js`) are dropped,
@@ -152,13 +151,13 @@ timeouts, the body cap, and asserts that no browser child is spawned.
 schemas, MCP negotiation, browser pool/ownership, fetch classification, and search
 parsing.
 
-CI runs the default parity suite and the search suite on macOS and Linux. Release
-packaging is verified by running `scripts/package-release.py` on the built binary.
+CI runs the full suite on macOS and Linux. Release packaging is verified by
+running `scripts/package-release.py` on the built binary.
 
 ## Packaging
 
-The crate version (`Cargo.toml`) feeds CLI and MCP identity. `make release`
-builds with search enabled; `make build` builds the four-tool core binary.
+The crate version (`Cargo.toml`) feeds CLI and MCP identity. `make build` and
+`make release` both build the five-tool binary.
 `make install` copies the binary and MIT license under a prefix.
 `scripts/package-release.py` builds `firepanda-VERSION-OS-ARCH.tar.gz` plus a
 SHA-256 file containing the binary, README, docs, and the Lightpanda installer.

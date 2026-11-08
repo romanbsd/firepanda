@@ -21,8 +21,7 @@ pub enum Tool {
     Fetch,
     Crawl,
     Map,
-    /// Keyless web search; only present in `--features search` builds.
-    #[cfg(feature = "search")]
+    /// Keyless web search.
     Search,
 }
 
@@ -34,7 +33,6 @@ impl Tool {
             Self::Fetch => FETCH,
             Self::Crawl => CRAWL,
             Self::Map => MAP,
-            #[cfg(feature = "search")]
             Self::Search => SEARCH,
         }
     }
@@ -44,7 +42,6 @@ const SCRAPE: u8 = 1 << 0;
 const FETCH: u8 = 1 << 1;
 const CRAWL: u8 = 1 << 2;
 const MAP: u8 = 1 << 3;
-#[cfg(feature = "search")]
 const SEARCH: u8 = 1 << 4;
 
 struct ToolDef {
@@ -97,7 +94,6 @@ static TOOL_TABLE: &[ToolDef] = &[
         description: "Discover links with a bounded same-origin crawl. External links are \
                       listed but never followed. Not a sitemap or search engine.",
     },
-    #[cfg(feature = "search")]
     ToolDef {
         id: Tool::Search,
         name: "search",
@@ -512,7 +508,6 @@ pub fn tools_list() -> Value {
         let tools: Vec<Value> = TOOL_TABLE
             .iter()
             .map(|entry| {
-                #[cfg(feature = "search")]
                 if entry.id == Tool::Search {
                     return crate::search::tool_definition();
                 }
@@ -556,7 +551,6 @@ pub async fn execute(browser: &Browser, name: &str, args: &Value) -> Result<Valu
         return fetch::run(&request).await.map_err(CallError::Tool);
     }
     // Search takes its own arguments (no URL), so it bypasses parse_request.
-    #[cfg(feature = "search")]
     if tool == Tool::Search {
         let query = crate::search::Query::parse(args).map_err(CallError::Invalid)?;
         return crate::search::execute(&query)
@@ -668,16 +662,9 @@ mod tests {
     fn schema_shape() {
         let list = tools_list();
         let tools = list.as_array().unwrap();
-        assert_eq!(tools.len(), if cfg!(feature = "search") { 5 } else { 4 });
+        assert_eq!(tools.len(), 5);
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert_eq!(
-            names,
-            if cfg!(feature = "search") {
-                &["scrape", "fetch", "crawl", "map", "search"][..]
-            } else {
-                &["scrape", "fetch", "crawl", "map"][..]
-            }
-        );
+        assert_eq!(names, ["scrape", "fetch", "crawl", "map", "search"]);
         for tool in tools {
             if tool["name"] == "search" {
                 let properties = &tool["inputSchema"]["properties"];

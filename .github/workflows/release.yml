@@ -23,8 +23,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Build and test
         run: |
-          cargo build --release --features search
-          cargo test --release --features search
+          cargo build --release
+          cargo test --release
           python3 scripts/install-lightpanda.py --release 1.0.2
           python3 tests/protocol.py target/release/firepanda
           python3 tests/transport.py target/release/firepanda

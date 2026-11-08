@@ -32,6 +32,8 @@ jobs:
       - run: python3 scripts/install-lightpanda.py --release 1.0.2
       - name: Raw fetch gate
         run: python3 tests/fetch.py target/release/firepanda "$PWD/.local/bin/lightpanda"
+      - name: Offline search gate
+        run: python3 tests/search.py target/release/firepanda "$PWD/.local/bin/lightpanda"
       - name: Native integration gate
         run: python3 tests/integration.py target/release/firepanda "$PWD/.local/bin/lightpanda"
       - name: Memory and descriptor hygiene gate
@@ -40,34 +42,3 @@ jobs:
         run: |
           python3 scripts/package-release.py --binary target/release/firepanda --output "$PWD/dist-check"
           test -f "$PWD/dist-check/firepanda-"*.tar.gz
-  rust-search:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with:
-          python-version: '3.13'
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-      - name: Clippy with the search feature
-        run: >-
-          cargo clippy --release --all-targets
-          --features search --target-dir target-search -- -D warnings
-      - name: Unit tests with the search feature
-        run: >-
-          cargo test --release --features search
-          --target-dir target-search
-      - name: Build the search binary
-        run: >-
-          cargo build --release --features search
-          --target-dir target-search
-      - name: Offline search gate
-        run: >-
-          python3 tests/search.py target-search/release/firepanda
-          "$PWD/.local/bin/lightpanda"

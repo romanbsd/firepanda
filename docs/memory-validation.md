@@ -9,13 +9,13 @@ tests verify its context/process cleanup rather than its internal memory safety.
 | Check | Command |
 | --- | --- |
 | Formatting | `cargo fmt --check` |
-| Lints (both feature sets) | `make check` |
-| Unit tests (both feature sets) | `make test` |
+| Lints  | `make check` |
+| Unit tests  | `make test` |
 | Protocol/CLI contracts | `make gates` → `tests/protocol.py` |
 | Adversarial CDP transport | `make gates` → `tests/transport.py` |
 | Native browser integration | `make gates` → `tests/integration.py` |
 | 100-cycle memory/descriptor stress | `make gates` → `tests/memory.py` |
-| Offline search fixtures | `make search-gates` → `tests/search.py` |
+| Offline search fixtures | `make gates` → `tests/search.py` |
 | Raw fetch (no browser) | `make gates` → `tests/fetch.py` |
 | Release packaging | `scripts/package-release.py` on the built binary |
 

@@ -43,7 +43,7 @@ class Protocol(unittest.TestCase):
             message(7, "ping", _meta={"io.modelcontextprotocol/protocolVersion": "2099-01-01"}),
         ])
         self.assertEqual([x["id"] for x in out], list(range(1, 8)))
-        self.assertEqual({t["name"] for t in out[0]["result"]["tools"]}, {"scrape", "fetch", "crawl", "map"})
+        self.assertEqual({t["name"] for t in out[0]["result"]["tools"]}, {"scrape", "fetch", "crawl", "map", "search"})
         self.assertEqual(out[0]["result"]["resultType"], "complete")
         self.assertIn(PROTOCOL_VERSION, out[1]["result"]["supportedVersions"])
         self.assertEqual(out[2]["error"]["code"], -32600)
@@ -60,6 +60,10 @@ class Protocol(unittest.TestCase):
             self.assertEqual(tool["annotations"]["openWorldHint"], True)
             if tool["name"] == "fetch":
                 self.assertEqual(set(properties), {"url", "timeout"})
+                continue
+            if tool["name"] == "search":
+                self.assertEqual(set(properties), {"query", "limit", "engine", "timeout"})
+                self.assertEqual(tool["inputSchema"]["required"], ["query"])
                 continue
             for name in ("waitForSelector", "waitForText"):
                 self.assertEqual(properties[name]["type"], "string")

@@ -285,10 +285,7 @@ mod tests {
             .handle(&json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}))
             .await
             .unwrap();
-        assert_eq!(
-            response["result"]["tools"].as_array().unwrap().len(),
-            if cfg!(feature = "search") { 5 } else { 4 }
-        );
+        assert_eq!(response["result"]["tools"].as_array().unwrap().len(), 5);
     }
 
     #[tokio::test]

@@ -1,9 +1,9 @@
 # Rust Migration Plan — firepanda
 
-**Status (2026-11-08): M0–M8 complete on `rust-rewrite`.** The core binary keeps the
-three original tools plus a browser-free `fetch`; `--features search` adds the fifth.
-The historical plan below is retained for provenance; `docs/native-design.md` and
-the README describe the shipped code.
+**Status (2026-11-08): M0–M8 complete on `rust-rewrite`.** The binary keeps the
+three original tools plus a browser-free `fetch` and a keyless `search`; search is
+always enabled. The historical plan below is retained for provenance;
+`docs/native-design.md` and the README describe the shipped code.
 
 Module-by-module plan for rewriting firepanda in Rust, with `primp` for browser impersonation
 (search), mapped to the existing black-box test suite. The Python tests are the parity contract:
@@ -33,7 +33,7 @@ unchanged against a Rust binary.
 | MCP JSON-RPC | **hand-rolled** over `tokio::io::stdin/stdout` + `serde_json` | `main.cpp` is only 326 lines; tests pin exact error codes/ordering (legacy negotiation, validation-before-start). `rmcp` 3.9 is an option later — not for parity |
 | CDP WebSocket | `tokio-tungstenite` (`client_async`) over `tokio::net::UnixStream` | Handshake frames per RFC 6455; Lightpanda quirks stay in one module |
 | JSON | `serde` + `serde_json` | Keep the 1 MiB `max_structured_content_bytes` cap and bounded output helpers as a thin wrapper |
-| Browser impersonation (search) | `primp` 2 (`Impersonate::ChromeV146`) | Feature-gated `--features search` so parity milestones don't depend on it |
+| Browser impersonation (search) | `primp` 2 (`Impersonate::ChromeV146`) | Feature-gated during the migration; now a core dependency |
 | Search HTML parsing | `scraper` (CSS selectors) | Translate ddgs XPath → CSS; port `extract.js` stays in-page |
 | URL handling | **port `normalize_url`/`parse_authority` 1:1** | Tests pin exact behavior (`/null`, `javascript:`, IPv6 rejection). Do not swap in `url` crate semantics unless it passes the same fixtures |
 | Process spawn/temp | `tokio::process` + `tempfile` | Replaces `posix_spawn` + temp-dir logic in `SpawnActions` |
@@ -91,7 +91,7 @@ tokio timeouts and `JoinSet`.
 | M4 | `tools/crawl.rs`: BFS crawl/map, concurrency, ordering | **integration.py** crawl/map section + **scripts/benchmark.py** concurrency sweep (ratios at conc 1/2/4/8) |
 | M5 | lifecycle: failure→drain→restart, lazy idle shutdown, SIGTERM teardown, descriptor hygiene | **memory.py** (100 iterations, `--leaks` path becomes descriptor/RSS check) + protocol idle/sigterm tests re-run |
 | M6 | `json.rs` bounded helpers + cap | **json_size** ported as `cargo test` |
-| M7 | `search/*` behind `--features search`: primp DDG/Brave, `search` tool (4th tool) | new fixture tests (offline HTML) + `tests/memory.py` tool-count 3→4 update |
+| M7 | `search/*` (feature-gated during migration, later always enabled): primp DDG/Brave, `search` tool | new fixture tests (offline HTML) + tool-count update |
 | M8 | packaging/release swap: delete `src/*.cpp`, CMake → thin wrapper or `just`/Makefile, docs (README, native-design, releasing), CI drops sanitizer jobs | full suite green on release artifacts for macOS arm64 + Linux |
 M0–M5 are parity; M6–M7 are additive; M8 is deletion. Estimate: **8–15 working days**
 (M1+M2 are the long poles; M3–M5 mostly re-derive encoded quirks).

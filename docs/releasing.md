@@ -2,15 +2,14 @@
 
 ## Before opening a pull request
 
-Run the formatting/lint/test targets for both feature sets, then the browser gates
+Run the formatting/lint/test targets, then the full gates
 with a native Lightpanda build:
 
 ```sh
 make check
 make test
 python3 scripts/install-lightpanda.py --release 1.0.2
-make gates           # core binary: protocol, transport, fetch, integration, memory
-make search-gates    # search-feature binary: offline engine fixtures
+make gates           # protocol, transport, fetch, search, integration, memory
 ```
 
 `make gates` uses `.local/bin/lightpanda` by default; override with
@@ -28,20 +27,17 @@ grouped; major updates arrive separately for review. To update locally:
 cargo update
 cargo upgrade --incompatible
 cargo test --release
-cargo test --release --features search
 ```
 
 Review the lockfile diff and upstream license/API changes before merging. New
-runtime dependencies should keep the binary small; search-only crates stay behind
-the `search` feature.
+runtime dependencies should keep the binary small.
 
 ## Prepare a release
 
 1. Bump `version` in `Cargo.toml` (and refresh `Cargo.lock`).
-2. Run `make check`, `make test`, `make gates`, and `make search-gates`.
+2. Run `make check`, `make test`, and `make gates`.
 3. Confirm the release build reports the new version:
-   `cargo build --release --features search &&
-   target/release/firepanda --version`.
+   `cargo build --release && target/release/firepanda --version`.
 4. Tag `vVERSION` and push. The Release workflow builds and tests the tagged
    tree on macOS and Ubuntu, packages archives, and creates a draft release.
 

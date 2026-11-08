@@ -5,17 +5,16 @@ crawling, discovering links, and searching the web with native
 [Lightpanda](https://lightpanda.io/). Runs locally on macOS and Linux, without
 Docker, Node, Chromium, or libcurl.
 
-Firepanda exposes four core tools over stdio: three drive Lightpanda, and one
-fetches raw resources directly over HTTP. A feature-gated search tool adds a
-fifth. Lightpanda starts lazily, is reused across requests, and stops after 60
-seconds of inactivity.
+Firepanda exposes five tools over stdio: three drive Lightpanda, one fetches raw
+resources directly over HTTP, and one searches the web. Lightpanda starts lazily,
+is reused across requests, and stops after 60 seconds of inactivity.
 
 - **fetch**: raw HTTP for JSON, Markdown, XML, text, images, and other simple
   resources, without starting the browser.
 - **scrape**: rendered Markdown, text, cleaned HTML, raw HTML, and links.
 - **crawl**: bounded, breadth-first traversal of same-origin pages.
 - **map**: anchor-link discovery, including external links without following them.
-- **search** (feature-gated): keyless web search through DuckDuckGo and Brave,
+- **search**: keyless web search through DuckDuckGo and Brave,
   using browser-impersonated HTTP requests instead of a browser or an API key.
 
 This is a focused scraping service. It does not provide screenshots, LLM
@@ -32,26 +31,22 @@ From a checkout of this repository:
 
 ```sh
 python3 scripts/install-lightpanda.py --release 1.0.2
-cargo build --release --features search
+cargo build --release
 ./target/release/firepanda --lightpanda "$PWD/.local/bin/lightpanda"
 ```
 
-Omit `--features search` for the core build, which advertises the four tools
-`scrape`, `fetch`, `crawl`, and `map`. `make release` is the same command;
-`make build` is the core build. `make gates` runs the browser-dependent suites
-against the core binary, and `make search-gates` runs the offline search suite
-against a separate `target-search` build so the core binary is never
-overwritten.
+`make build` and `make release` both produce the five-tool binary. `make gates`
+runs every black-box suite: protocol, transport, fetch, search, native
+integration, and memory stress.
 
 ### Release build
 
 ```sh
-make release          # cargo build --release --features search
+make release          # cargo build --release
 make package          # also writes dist/firepanda-VERSION-OS-ARCH.tar.gz + .sha256
 ```
 
-The release binary is `target/release/firepanda`. `make release` enables the
-`search` tool; use `make build` for the four-tool core binary. `make package`
+The release binary is `target/release/firepanda`. `make package`
 requires a tested build and produces the same archive used by the release
 workflow.
 
@@ -152,7 +147,7 @@ Discover links using `map`:
 {"url":"https://example.com","limit":5,"maxDepth":1}
 ```
 
-Search the web without an API key using `search` (search-enabled build):
+Search the web without an API key using `search`:
 
 ```json
 {"query":"lightpanda headless browser","limit":5}
@@ -354,10 +349,9 @@ The black-box suites spawn the binary over stdio, so they run unchanged against
 any build:
 
 ```sh
-make check          # cargo fmt --check + clippy for both feature sets
-make test           # cargo test for both feature sets
-make gates          # protocol, transport, integration, memory (needs Lightpanda)
-make search-gates   # offline search fixtures, separate target directory
+make check          # cargo fmt --check + clippy
+make test           # cargo test
+make gates          # protocol, transport, fetch, search, integration, memory
 ```
 
 `clippy` runs with the pedantic and nursery groups enabled in `Cargo.toml`
@@ -380,8 +374,7 @@ network access.
 `tests/fetch.py` serves JSON, Markdown, XML, images, redirects, errors, timeouts,
 and oversized bodies, and asserts that `fetch` never starts Lightpanda.
 
-CI runs the parity suite on macOS and Linux, the search feature suite separately,
-and verifies release packaging. See [contributing and release maintenance](docs/releasing.md).
+CI runs the full suite on macOS and Linux and verifies release packaging. See [contributing and release maintenance](docs/releasing.md).
 
 ## Security and licensing
 

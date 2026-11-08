@@ -47,7 +47,7 @@ def tool(name, **arguments):
 
 try:
     tool_list = rpc("tools/list")
-    assert len(tool_list["tools"]) in (4, 5)  # 5 when built with --features search
+    assert len(tool_list["tools"]) == 5
     ready = tool("scrape", url=url + "/ready", waitForSelector="#ready", waitForText="Content ready", timeout=3000)
     assert "**ready**" in ready["markdown"], ready
     assert ready["metadata"]["httpStatus"] == 200, ready
@@ -224,7 +224,7 @@ else:
 # The MCP service remains available after its lazily started browser goes idle.
 service = Service([binary, "--lightpanda", lightpanda, "--idle-timeout", "1"])
 try:
-    assert len(rpc("tools/list")["tools"]) in (4, 5)
+    assert len(rpc("tools/list")["tools"]) == 5
     assert not children(), "Tool discovery must not launch the browser"
     tool("scrape", url=url)
     idle_pid, idle_socket = child()
@@ -282,7 +282,7 @@ with tempfile.TemporaryDirectory(prefix="firepanda-external-", dir="/tmp") as di
             time.sleep(0.01)
         service = Service([binary, "--socket", sock, "--idle-timeout", "1"])
         try:
-            assert len(rpc("tools/list")["tools"]) in (4, 5)
+            assert len(rpc("tools/list")["tools"]) == 5
             assert "Rendered by JavaScript" in tool("scrape", url=url)["markdown"]
             time.sleep(1.3)
             assert external.poll() is None, "Idle timeout terminated an external browser"
