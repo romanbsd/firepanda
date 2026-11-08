@@ -38,6 +38,27 @@ jobs:
           python-version: '3.13'
       - run: python -m pip install clang-format==23.1.5
       - run: clang-format --dry-run --Werror src/*.cpp src/*.hpp tests/json.cpp
+  rust:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --manifest-path rust/Cargo.toml --check
+      - run: cargo clippy --manifest-path rust/Cargo.toml --release --all-targets -- -D warnings
+      - run: cargo test --manifest-path rust/Cargo.toml --release
+      - run: cargo build --manifest-path rust/Cargo.toml --release
+      - name: MCP protocol parity gate
+        run: python3 tests/protocol.py rust/target/release/firepanda
   sanitizers:
     runs-on: ubuntu-latest
     timeout-minutes: 15
