@@ -64,6 +64,8 @@ jobs:
       - run: python3 scripts/install-lightpanda.py --release 1.0.2
       - name: Native integration parity gate
         run: python3 tests/integration.py rust/target/release/firepanda "$PWD/.local/bin/lightpanda"
+      - name: Memory and descriptor hygiene gate
+        run: python3 tests/memory.py rust/target/release/firepanda "$PWD/.local/bin/lightpanda"
   sanitizers:
     runs-on: ubuntu-latest
     timeout-minutes: 15
