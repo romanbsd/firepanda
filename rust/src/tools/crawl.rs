@@ -96,8 +96,11 @@ impl Crawl {
         // Redirected pages are returned, but external destinations never expand.
         let expand = origin(&canonical) == self.start_origin;
         if self.tool == Tool::Map
-            && let Some(warnings) = page.get("warnings").cloned()
+            && let Some(warnings) = page
+                .as_object_mut()
+                .and_then(|object| object.remove("warnings"))
         {
+            // Map does not return the page itself, so move its warnings.
             self.warnings
                 .push(json!({"url": canonical, "warnings": warnings}));
         }
@@ -230,15 +233,23 @@ pub async fn run(
                 break;
             }
             crawl.attempted += 1;
-            let mut page_request = request.clone();
-            page_request.url = url.clone();
-            page_request.timeout = std::cmp::min(page_timeout, remaining);
-            page_request.formats = page_formats.clone();
+            let mut formats = page_formats.clone();
             if (return_links || depth < crawl.max_depth)
-                && !page_request.formats.iter().any(|format| format == "links")
+                && !formats.iter().any(|format| format == "links")
             {
-                page_request.formats.push("links".to_string());
+                formats.push("links".to_string());
             }
+            // Build the per-page request directly: cloning the template and
+            // then overwriting url/formats/timeout would copy them twice.
+            let page_request = PageRequest {
+                url: url.clone(),
+                formats,
+                only_main_content: request.only_main_content,
+                timeout: std::cmp::min(page_timeout, remaining),
+                wait_for: request.wait_for,
+                wait_for_selector: request.wait_for_selector.clone(),
+                wait_for_text: request.wait_for_text.clone(),
+            };
             let task = browser.start_page(page_request).await;
             inflight.push_back(Inflight { depth, url, task });
         }

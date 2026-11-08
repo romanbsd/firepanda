@@ -85,14 +85,27 @@ struct CountingWriter {
 
 impl std::io::Write for CountingWriter {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.written = self.written.saturating_add(bytes.len());
-        if self.written > self.limit {
-            return Err(std::io::Error::other("serialized size limit exceeded"));
-        }
+        self.add(bytes.len())?;
         Ok(bytes.len())
     }
 
+    fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        // Serializer payloads arrive as whole strings/numbers; counting the
+        // slice once avoids the default per-write loop.
+        self.add(bytes.len())
+    }
+
     fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl CountingWriter {
+    fn add(&mut self, length: usize) -> std::io::Result<()> {
+        self.written = self.written.saturating_add(length);
+        if self.written > self.limit {
+            return Err(std::io::Error::other("serialized size limit exceeded"));
+        }
         Ok(())
     }
 }

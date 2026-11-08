@@ -71,6 +71,8 @@ class Engines(http.server.BaseHTTPRequestHandler):
             self.reply(200, BRAVE_PAGE)
         elif path == "/empty":
             self.reply(200, EMPTY_PAGE)
+        elif path == "/huge":
+            self.reply(200, "x" * (8 * 1024 * 1024 + 1))
         elif path == "/broken":
             self.reply(503, "engine unavailable")
         else:
@@ -81,7 +83,17 @@ class Engines(http.server.BaseHTTPRequestHandler):
         self.route(urllib.parse.urlparse(self.path).path, "")
 
 
-server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Engines)
+class QuietServer(http.server.ThreadingHTTPServer):
+    """The oversized-body test aborts mid-response; that reset is expected."""
+
+    def handle_error(self, request, client_address):
+        error = sys.exc_info()[1]
+        if isinstance(error, (ConnectionResetError, BrokenPipeError)):
+            return
+        super().handle_error(request, client_address)
+
+
+server = QuietServer(("127.0.0.1", 0), Engines)
 server.requests = []
 threading.Thread(target=server.serve_forever, daemon=True).start()
 base = "http://127.0.0.1:" + str(server.server_port)
@@ -194,6 +206,15 @@ service = service_for(ddg="/empty", brave="/empty")
 try:
     empty = service.call("tools/call", name="search", arguments={"query": "nothing"})
     assert empty.get("isError") and "No search results" in empty["content"][0]["text"], empty
+finally:
+    stop(service)
+
+# A response larger than the 8 MiB body cap is rejected before parsing.
+service = service_for(ddg="/huge")
+try:
+    huge = service.call("tools/call", name="search",
+                        arguments={"query": "x", "engine": "duckduckgo"})
+    assert huge.get("isError") and "exceeds 8 MiB" in huge["content"][0]["text"], huge
 finally:
     stop(service)
 

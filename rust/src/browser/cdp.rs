@@ -10,8 +10,7 @@ use serde_json::{Value, json};
 use std::time::{Duration, Instant};
 use tokio_tungstenite::tungstenite::Message;
 
-/// In-page extractor, embedded verbatim from the C++ build (the C++ binary
-/// embeds it through extraction.hpp.in).
+/// In-page extractor, embedded verbatim.
 const EXTRACTION_JS: &str = include_str!("extract.js");
 
 const STOPPING: &str = "Service is stopping";
@@ -184,11 +183,16 @@ impl Connection {
     ) -> Result<Value, ScrapeError> {
         self.next_id += 1;
         let id = self.next_id;
-        let mut request = json!({"id": id, "method": method, "params": params});
+        // Build the envelope by moving `params`: a large Runtime.evaluate
+        // payload (the embedded extractor call) must not be cloned here.
+        let mut envelope = serde_json::Map::with_capacity(4);
+        envelope.insert("id".to_string(), Value::from(id));
+        envelope.insert("method".to_string(), Value::String(method.to_string()));
+        envelope.insert("params".to_string(), params);
         if !session.is_empty() {
-            request["sessionId"] = json!(session);
+            envelope.insert("sessionId".to_string(), Value::String(session.to_string()));
         }
-        let Ok(payload) = serde_json::to_string(&request) else {
+        let Ok(payload) = serde_json::to_string(&Value::Object(envelope)) else {
             return Err(ScrapeError::fatal("Cannot write Lightpanda CDP command"));
         };
         let ws = self
@@ -205,7 +209,7 @@ impl Connection {
             return Err(ScrapeError::fatal("Cannot write Lightpanda CDP command"));
         }
         loop {
-            let response = self.receive(deadline).await.map_err(ScrapeError::fatal)?;
+            let mut response = self.receive(deadline).await.map_err(ScrapeError::fatal)?;
             let Some(object) = response.as_object() else {
                 return Err(ScrapeError::fatal("CDP response must be an object"));
             };
@@ -234,11 +238,15 @@ impl Connection {
             if has_error {
                 return Err(ScrapeError::Cdp(format!("{method}: {}", object["error"])));
             }
-            let result = object
-                .get("result")
-                .filter(|value| value.is_object())
-                .ok_or_else(|| ScrapeError::fatal("CDP result must be an object"))?;
-            return Ok(result.clone());
+            if !object.get("result").is_some_and(Value::is_object) {
+                return Err(ScrapeError::fatal("CDP result must be an object"));
+            }
+            // Move the result out of the envelope: extraction replies carry
+            // the whole page payload, so cloning here would duplicate it.
+            return Ok(response
+                .get_mut("result")
+                .map(Value::take)
+                .expect("result presence checked above"));
         }
     }
 
@@ -400,17 +408,14 @@ async fn extract(
         "readyTimeout": remaining,
     });
     let expression = format!("{EXTRACTION_JS}({extraction})");
-    let value = connection
-        .call(
-            "Runtime.evaluate",
-            json!({
-                "expression": expression,
-                "returnByValue": true,
-                "awaitPromise": true,
-            }),
-            session,
-            deadline,
-        )
+    // Move the expression string into the params map: `json!` would clone it,
+    // and it carries the whole embedded extractor.
+    let mut params = serde_json::Map::with_capacity(3);
+    params.insert("expression".to_string(), Value::String(expression));
+    params.insert("returnByValue".to_string(), Value::Bool(true));
+    params.insert("awaitPromise".to_string(), Value::Bool(true));
+    let mut value = connection
+        .call("Runtime.evaluate", Value::Object(params), session, deadline)
         .await?;
     if value.get("exceptionDetails").is_some() {
         return Err(ScrapeError::fatal(format!(
@@ -419,9 +424,9 @@ async fn extract(
         )));
     }
     value
-        .get("result")
-        .and_then(|inner| inner.get("value"))
-        .cloned()
+        .get_mut("result")
+        .and_then(|inner| inner.get_mut("value"))
+        .map(Value::take)
         .ok_or_else(|| ScrapeError::fatal("Page extraction failed: missing result value"))
 }
 

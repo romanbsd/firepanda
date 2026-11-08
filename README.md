@@ -257,6 +257,7 @@ See [design details](docs/native-design.md) for code structure and protocol beha
 | Crawl/map traversal | 100 attempts, depth 5 maximum |
 | Unique discovery/frontier links | 10000 |
 | Search results | 20 per call; 60-second budget maximum |
+| Search response body | 8 MiB |
 
 Exactly reaching a link cap without omitting anything is complete. Dropped links
 set `linksTruncated` on scrape output and propagate `truncated` to crawl/map.

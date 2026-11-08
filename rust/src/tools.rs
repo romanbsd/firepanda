@@ -212,15 +212,12 @@ fn parse_string(args: &Value, name: &str) -> Result<String, String> {
     let Some(value) = args.get(name) else {
         return Ok(String::new());
     };
+    let invalid = || format!("{name} must be a nonempty string within its byte limit");
     let Some(text) = value.as_str() else {
-        return Err(format!(
-            "{name} must be a nonempty string within its byte limit"
-        ));
+        return Err(invalid());
     };
     if text.is_empty() || text.len() > usize::try_from(option.maximum).unwrap_or(usize::MAX) {
-        return Err(format!(
-            "{name} must be a nonempty string within its byte limit"
-        ));
+        return Err(invalid());
     }
     Ok(text.to_string())
 }

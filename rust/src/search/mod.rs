@@ -30,25 +30,28 @@ const DDG_URL: &str = "https://html.duckduckgo.com/html/";
 const BRAVE_URL: &str = "https://search.brave.com/search";
 const DDG_OVERRIDE: &str = "FIREPANDA_SEARCH_DDG_URL";
 const BRAVE_OVERRIDE: &str = "FIREPANDA_SEARCH_BRAVE_URL";
+/// Engine pages are small; cap the body so a pathological response cannot
+/// consume unbounded memory before parsing.
+const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 
 /// Shared by `tools/list` and the tool table so the two cannot drift.
 pub const DESCRIPTION: &str = "Search the web without an API key using browser-impersonated \
                                requests to DuckDuckGo and Brave. Returns titles, URLs, and \
                                snippets.";
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Engine {
-    Auto,
     DuckDuckGo,
     Brave,
 }
 
 impl Engine {
-    fn parse(value: &str) -> Result<Self, String> {
+    /// `None` means `auto` (try engines in order).
+    fn parse(value: &str) -> Result<Option<Self>, String> {
         match value {
-            "auto" => Ok(Self::Auto),
-            "duckduckgo" | "ddg" => Ok(Self::DuckDuckGo),
-            "brave" => Ok(Self::Brave),
+            "auto" => Ok(None),
+            "duckduckgo" | "ddg" => Ok(Some(Self::DuckDuckGo)),
+            "brave" => Ok(Some(Self::Brave)),
             _ => Err("engine must be auto, duckduckgo, or brave".to_string()),
         }
     }
@@ -58,7 +61,8 @@ impl Engine {
 pub struct Query {
     text: String,
     limit: usize,
-    engine: Engine,
+    /// `None` selects the documented auto fallback order.
+    engine: Option<Engine>,
     timeout: Duration,
 }
 
@@ -85,7 +89,7 @@ impl Query {
             Some(value) => bounded_integer(value, "limit", 1, MAX_LIMIT)?,
         };
         let engine = match args.get("engine") {
-            None => Engine::Auto,
+            None => None,
             Some(value) => {
                 let Some(name) = value.as_str() else {
                     return Err("engine must be a string".to_string());
@@ -170,11 +174,12 @@ pub fn tool_definition() -> Value {
 
 /// Run one search, trying engines in order until one yields results.
 pub async fn execute(query: &Query) -> Result<Value, String> {
-    let single = [query.engine];
-    let engines: &[Engine] = if query.engine == Engine::Auto {
-        &[Engine::DuckDuckGo, Engine::Brave]
-    } else {
+    let both = [Engine::DuckDuckGo, Engine::Brave];
+    let single = [query.engine.unwrap_or(Engine::DuckDuckGo)];
+    let engines: &[Engine] = if query.engine.is_some() {
         &single
+    } else {
+        &both
     };
     let deadline = tokio::time::Instant::now() + query.timeout;
     let mut last_error = String::new();
@@ -187,7 +192,6 @@ pub async fn execute(query: &Query) -> Result<Value, String> {
         let base = match engine {
             Engine::DuckDuckGo => endpoint(DDG_OVERRIDE, DDG_URL),
             Engine::Brave => endpoint(BRAVE_OVERRIDE, BRAVE_URL),
-            Engine::Auto => unreachable!("auto is expanded above"),
         };
         match search_engine(*engine, &base, &query.text, remaining).await {
             Ok(items) if !items.is_empty() => {
@@ -217,7 +221,11 @@ fn client() -> Result<&'static primp::Client, String> {
         .get_or_init(|| {
             primp::Client::builder()
                 .impersonate(primp::Impersonate::ChromeV146)
-                .timeout(Duration::from_secs(30))
+                // Backstop only: each attempt is bounded by the remaining
+                // tool budget, which may be the full 60-second maximum.
+                .timeout(Duration::from_millis(
+                    u64::try_from(MAX_TIMEOUT_MS).expect("positive timeout bound"),
+                ))
                 .build()
                 .map_err(|error| format!("Search client failed: {}", error.without_url()))
         })
@@ -238,7 +246,6 @@ async fn search_engine(
             .get(base)
             .query(&[("q", query), ("b", ""), ("l", "us-en")]),
         Engine::Brave => client.get(base).query(&[("q", query), ("source", "web")]),
-        Engine::Auto => unreachable!("auto never reaches an engine request"),
     };
     let response = tokio::time::timeout(timeout, request.send())
         .await
@@ -248,15 +255,37 @@ async fn search_engine(
     if !status.is_success() {
         return Err(format!("Search engine returned HTTP {status}"));
     }
-    let body = response
-        .text()
-        .await
-        .map_err(|error| format!("Search response failed: {}", error.without_url()))?;
+    let body = read_body(response).await?;
     Ok(match engine {
         Engine::DuckDuckGo => parse_ddg(&body, base),
         Engine::Brave => parse_brave(&body, base),
-        Engine::Auto => unreachable!(),
     })
+}
+
+/// Read an engine page with a hard size cap. Engine pages are UTF-8; a
+/// lossy decode only matters for malformed responses that fail parsing anyway.
+async fn read_body(mut response: primp::Response) -> Result<String, String> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > u64::try_from(MAX_BODY_BYTES).unwrap_or(u64::MAX))
+    {
+        return Err("Search response exceeds 8 MiB".to_string());
+    }
+    let expected = usize::try_from(response.content_length().unwrap_or(0))
+        .unwrap_or(MAX_BODY_BYTES)
+        .min(MAX_BODY_BYTES);
+    let mut body = Vec::with_capacity(expected);
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| format!("Search response failed: {}", error.without_url()))?
+    {
+        if chunk.len() > MAX_BODY_BYTES - body.len() {
+            return Err("Search response exceeds 8 MiB".to_string());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(String::from_utf8_lossy(&body).into_owned())
 }
 
 struct Item {
@@ -290,12 +319,16 @@ fn selector(css: &str) -> Selector {
 }
 
 fn collapse(element: &ElementRef<'_>) -> String {
-    element
-        .text()
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
+    let mut parts = element.text().flat_map(str::split_whitespace);
+    let Some(first) = parts.next() else {
+        return String::new();
+    };
+    let mut text = String::from(first);
+    for part in parts {
+        text.push(' ');
+        text.push_str(part);
+    }
+    text
 }
 
 /// `DuckDuckGo` HTML endpoint: `//div[contains(@class,'body')]` items, `h2`
@@ -397,7 +430,11 @@ fn result_url(href: &str, base: &str) -> Option<String> {
     if target.contains("duckduckgo.com/y.js") {
         return None;
     }
-    normalize_url(&resolve(base, &target)).ok()
+    // RFC 3986 resolution for absolute, protocol-relative, root-relative, and
+    // relative hrefs; `normalize_url` then applies Firepanda's own URL rules.
+    let base = url::Url::parse(base).ok()?;
+    let joined = base.join(&target).ok()?.to_string();
+    normalize_url(&joined).ok()
 }
 
 /// `DuckDuckGo` wraps results in `/l/?uddg=<encoded target>`; recover the target.
@@ -449,26 +486,6 @@ const fn hex_value(byte: u8) -> Option<u8> {
         b'A'..=b'F' => Some(byte - b'A' + 10),
         _ => None,
     }
-}
-
-/// Minimal RFC 3986 resolution: absolute, protocol-relative, root-relative,
-/// and relative paths (the shapes engine pages emit).
-fn resolve(base: &str, href: &str) -> String {
-    if href.starts_with("http://") || href.starts_with("https://") {
-        return href.to_string();
-    }
-    let (scheme, rest) = base.split_once("://").unwrap_or(("https", base));
-    let origin_end = rest.find('/').unwrap_or(rest.len());
-    let origin = &rest[..origin_end];
-    if let Some(protocol_relative) = href.strip_prefix("//") {
-        return format!("{scheme}://{protocol_relative}");
-    }
-    if href.starts_with('/') {
-        return format!("{scheme}://{origin}{href}");
-    }
-    let path = &rest[origin_end..];
-    let directory = &path[..path.rfind('/').map_or(0, |index| index + 1)];
-    format!("{scheme}://{origin}{directory}{href}")
 }
 
 #[cfg(test)]
@@ -570,9 +587,9 @@ mod tests {
         let query = Query::parse(&json!({"query": "rust", "limit": 3, "engine": "brave"}))
             .expect("valid query");
         assert_eq!(query.limit, 3);
-        assert!(query.engine == Engine::Brave);
+        assert_eq!(query.engine, Some(Engine::Brave));
         let defaults = Query::parse(&json!({"query": "rust"})).expect("valid query");
-        assert!(defaults.engine == Engine::Auto);
+        assert_eq!(defaults.engine, None);
         assert_eq!(
             defaults.limit,
             usize::try_from(DEFAULT_LIMIT).expect("positive default")
@@ -584,23 +601,28 @@ mod tests {
     }
 
     #[test]
-    fn resolution_covers_engine_href_shapes() {
+    fn result_urls_cover_engine_href_shapes() {
         assert_eq!(
-            resolve("https://example.com/base/page", "https://other.test/x"),
-            "https://other.test/x"
+            result_url("https://other.test/x", DDG_URL).as_deref(),
+            Some("https://other.test/x")
         );
         assert_eq!(
-            resolve("https://example.com/base/page", "//cdn.test/x"),
-            "https://cdn.test/x"
+            result_url("//cdn.test/x", DDG_URL).as_deref(),
+            Some("https://cdn.test/x")
         );
         assert_eq!(
-            resolve("https://example.com/base/page", "/root"),
-            "https://example.com/root"
+            result_url("/root", DDG_URL).as_deref(),
+            Some("https://html.duckduckgo.com/root")
         );
         assert_eq!(
-            resolve("https://example.com/base/page", "child"),
-            "https://example.com/base/child"
+            result_url("child", DDG_URL).as_deref(),
+            Some("https://html.duckduckgo.com/html/child")
         );
+        assert_eq!(
+            result_url("../up", DDG_URL).as_deref(),
+            Some("https://html.duckduckgo.com/up")
+        );
+        assert_eq!(result_url("javascript:void(0)", DDG_URL), None);
         assert_eq!(
             percent_decode("https%3A%2F%2Fexample.com%2Fa%20b+c"),
             "https://example.com/a%20b+c"

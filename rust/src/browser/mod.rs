@@ -142,10 +142,7 @@ impl Browser {
     /// dropped by `fetch`, the pool and child by `shutdown`); external sockets
     /// survive so the next scrape reconnects fresh.
     pub async fn scrape(&self, request: &PageRequest) -> Result<Value, String> {
-        self.inner.process.lock().await.idle_since = None;
-        let start = Instant::now();
-        let deadline = start + request.timeout;
-        let connect_deadline = std::cmp::min(deadline, start + CONNECT_WINDOW);
+        let (deadline, connect_deadline) = self.begin(request.timeout).await;
         let outcome = self.fetch(request, deadline, connect_deadline).await;
         if outcome.is_err() {
             // disposeOnDetach releases this operation's context even if its
@@ -154,6 +151,14 @@ impl Browser {
             self.shutdown().await;
         }
         outcome
+    }
+
+    /// Clear idle bookkeeping and derive the page and connect deadlines.
+    /// Idle starts when work completes, not when it starts.
+    async fn begin(&self, timeout: Duration) -> (Instant, Instant) {
+        self.inner.process.lock().await.idle_since = None;
+        let start = Instant::now();
+        (start + timeout, start + timeout.min(CONNECT_WINDOW))
     }
 
     async fn fetch(
@@ -182,10 +187,7 @@ impl Browser {
     /// spawn; a checkout failure surfaces as `Failed` without releasing the
     /// browser, which the crawl loop reaps after draining siblings.
     pub async fn start_page(&self, request: PageRequest) -> PageTask {
-        self.inner.process.lock().await.idle_since = None;
-        let start = Instant::now();
-        let deadline = start + request.timeout;
-        let connect_deadline = std::cmp::min(deadline, start + CONNECT_WINDOW);
+        let (deadline, connect_deadline) = self.begin(request.timeout).await;
         let connection = match self.checkout(connect_deadline).await {
             Ok(connection) => connection,
             Err(message) => return PageTask::Failed(message),

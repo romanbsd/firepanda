@@ -83,10 +83,11 @@ deduplicated by normalized URL. `auto` tries DuckDuckGo, then Brave; network/HTT
 failures and empty result sets fall through, all under one total timeout.
 
 The response is Firecrawl v2 shaped (`{"success": true, "data": {"web": [...]}}`).
-`FIREPANDA_SEARCH_DDG_URL` and `FIREPANDA_SEARCH_BRAVE_URL` override the engine
-endpoints; `tests/search.py` uses them to serve canned HTML locally, so parsing,
-fallback, and validation are tested offline. Live availability is an engine
-property, not a test gate.
+Engine bodies are capped at 8 MiB and each attempt runs under the remaining tool
+budget. `FIREPANDA_SEARCH_DDG_URL` and `FIREPANDA_SEARCH_BRAVE_URL` override the
+engine endpoints; `tests/search.py` uses them to serve canned HTML locally, so
+parsing, fallback, and validation are tested offline. Live availability is an
+engine property, not a test gate.
 
 ## Validation
 
