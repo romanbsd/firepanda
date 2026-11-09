@@ -52,7 +52,7 @@ pub async fn run(request: &Request) -> Result<Value, String> {
         // the renderer, so send the caller to scrape instead.
         return Err("HTML content: use the scrape tool for rendered HTML".to_string());
     }
-    let bytes = http::read_limited(response, MAX_FETCH_BYTES, deadline).await?;
+    let bytes = http::read_limited(response, MAX_FETCH_BYTES, deadline, "HTTP").await?;
     let size = bytes.len();
     let mut payload = crate::json::object([
         ("url", Value::String(final_url)),

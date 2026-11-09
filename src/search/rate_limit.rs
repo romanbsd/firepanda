@@ -7,7 +7,7 @@
 //! header always wins over that default.
 
 use super::Engine;
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::time::Instant;
 
@@ -41,7 +41,10 @@ pub fn parse_retry_after(value: &str) -> Option<Duration> {
         return Some(Duration::from_secs(seconds).min(MAX_DECLARED_WAIT));
     }
     let when = httpdate::parse_http_date(value).ok()?;
-    let wait = when.duration_since(SystemTime::now()).ok()?;
+    // A date already in the past means "retry now".
+    let wait = when
+        .duration_since(SystemTime::now())
+        .unwrap_or(Duration::ZERO);
     Some(wait.min(MAX_DECLARED_WAIT))
 }
 
@@ -65,58 +68,40 @@ pub fn backoff(attempt: u32) -> Duration {
     Duration::from_secs(1 << attempt.min(3))
 }
 
-pub const fn label(engine: Engine) -> &'static str {
-    match engine {
-        Engine::DuckDuckGo => "DuckDuckGo",
-        Engine::Brave => "Brave",
-    }
-}
-
 pub fn rate_limited_error(engine: Engine, wait: Duration) -> String {
     format!(
-        "{} rate limited (HTTP 429); retry in {}s",
-        label(engine),
+        "{engine} rate limited (HTTP 429); retry in {}s",
         wait.as_secs().max(1)
     )
 }
 
-fn slots() -> &'static Mutex<[Option<Instant>; 2]> {
-    static SLOTS: OnceLock<Mutex<[Option<Instant>; 2]>> = OnceLock::new();
-    SLOTS.get_or_init(|| Mutex::new([None, None]))
-}
+/// Cooldown deadline per engine, indexed by `Engine as usize`.
+static SLOTS: Mutex<[Option<Instant>; 2]> = Mutex::new([None, None]);
 
-const fn slot_index(engine: Engine) -> usize {
-    match engine {
-        Engine::DuckDuckGo => 0,
-        Engine::Brave => 1,
-    }
-}
-
-fn cooldown_until(engine: Engine) -> Option<Instant> {
-    let slots = slots()
+fn slot(engine: Engine) -> Option<Instant> {
+    SLOTS
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    slots[slot_index(engine)]
+        .unwrap_or_else(std::sync::PoisonError::into_inner)[engine as usize]
+}
+
+fn set_slot(engine: Engine, until: Option<Instant>) {
+    SLOTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)[engine as usize] = until;
 }
 
 pub fn set_cooldown(engine: Engine, until: Instant) {
-    let mut slots = slots()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    slots[slot_index(engine)] = Some(until);
+    set_slot(engine, Some(until));
 }
 
 pub fn clear_cooldown(engine: Engine) {
-    let mut slots = slots()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    slots[slot_index(engine)] = None;
+    set_slot(engine, None);
 }
 
 /// Wait out an existing cooldown when the remaining tool budget can absorb it.
 /// If it cannot, fail immediately with the retry hint instead of sleeping.
 pub async fn wait_for_slot(engine: Engine, deadline: Instant) -> Result<(), String> {
-    let Some(until) = cooldown_until(engine) else {
+    let Some(until) = slot(engine) else {
         return Ok(());
     };
     let now = Instant::now();
@@ -140,6 +125,10 @@ mod tests {
         assert_eq!(parse_retry_after("2"), Some(Duration::from_secs(2)));
         assert_eq!(parse_retry_after("999999"), Some(MAX_DECLARED_WAIT));
         assert_eq!(parse_retry_after("not-a-date"), None);
+        assert_eq!(
+            parse_retry_after("Wed, 21 Oct 2015 07:28:00 GMT"),
+            Some(Duration::ZERO)
+        );
         let date = httpdate::fmt_http_date(SystemTime::now() + Duration::from_secs(2));
         let parsed = parse_retry_after(&date).expect("valid HTTP date");
         assert!(

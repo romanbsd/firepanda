@@ -249,13 +249,22 @@ fn known_option(name: &str) -> &'static OptionDef {
 
 fn parse_integer(args: &Value, name: &str) -> Result<i64, String> {
     let option = known_option(name);
-    let Some(value) = args.get(name) else {
-        return Ok(option.fallback);
-    };
+    args.get(name).map_or(Ok(option.fallback), |value| {
+        bounded_integer(value, name, option.minimum, option.maximum)
+    })
+}
+
+/// Exact JSON integer within an inclusive range; shared with `search`.
+pub fn bounded_integer(
+    value: &Value,
+    name: &str,
+    minimum: i64,
+    maximum: i64,
+) -> Result<i64, String> {
     let Some(actual) = as_integer(value) else {
         return Err(format!("{name} must be an integer"));
     };
-    if actual < i128::from(option.minimum) || actual > i128::from(option.maximum) {
+    if actual < i128::from(minimum) || actual > i128::from(maximum) {
         return Err(format!("{name} is outside the supported range"));
     }
     i64::try_from(actual).map_err(|_| format!("{name} is outside the supported range"))
@@ -369,6 +378,9 @@ fn parse_authority(authority: &str) -> Result<Authority<'_>, String> {
         (host, format!("[{address}]"))
     } else {
         let host = &authority[..authority.find(':').unwrap_or(authority.len())];
+        if !host.is_ascii() {
+            return Err("Internationalized hostnames must use punycode (xn--)".to_string());
+        }
         let plain = !host.is_empty()
             && host
                 .bytes()
@@ -421,10 +433,10 @@ pub fn normalize_url(input: &str) -> Result<String, String> {
     } else {
         normalized.push_str(parsed.host);
     }
-    if parsed.has_port {
+    // WHATWG treats an empty port ("http://x:/") as the scheme default.
+    if parsed.has_port && !parsed.port.is_empty() {
         let port = parsed.port;
-        let digits =
-            !port.is_empty() && port.len() <= 5 && port.bytes().all(|b| b.is_ascii_digit());
+        let digits = port.len() <= 5 && port.bytes().all(|b| b.is_ascii_digit());
         let number: u64 = if digits { port.parse().unwrap() } else { 0 };
         if !digits || number == 0 || number > 65535 {
             return Err("Invalid URL port".to_string());
@@ -615,6 +627,12 @@ mod tests {
         assert_eq!(
             normalize_url("http://[::1]:80/a").unwrap(),
             "http://[::1]/a"
+        );
+        assert_eq!(normalize_url("http://x:/a").unwrap(), "http://x/a");
+        assert!(
+            normalize_url("https://münchen.de/")
+                .unwrap_err()
+                .contains("punycode")
         );
     }
 

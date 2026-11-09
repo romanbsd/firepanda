@@ -298,12 +298,14 @@ pub async fn run(
         }
     }
 
+    // Queued URLs already reached through a redirect were not left behind.
+    let unvisited = crawl
+        .queue
+        .iter()
+        .any(|(url, _)| !crawl.visited.contains(url));
     let mut result = crate::json::object([
         ("attempted", Value::from(crawl.attempted)),
-        (
-            "truncated",
-            Value::Bool(crawl.truncated || !crawl.queue.is_empty()),
-        ),
+        ("truncated", Value::Bool(crawl.truncated || unvisited)),
     ]);
     result["errors"] = Value::Array(crawl.errors);
     if !crawl.warnings.is_empty() {

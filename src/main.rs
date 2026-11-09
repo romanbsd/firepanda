@@ -122,22 +122,14 @@ async fn serve(options: browser::Options, stop: browser::Stop) -> i32 {
 async fn main() {
     let options = cli::parse();
     let stop = browser::Stop::channel();
-    let mut terminate =
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(signal) => signal,
-            Err(error) => {
-                eprintln!("firepanda: cannot install shutdown signal handler: {error}");
-                std::process::exit(1);
-            }
-        };
-    let mut interrupt =
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()) {
-            Ok(signal) => signal,
-            Err(error) => {
-                eprintln!("firepanda: cannot install shutdown signal handler: {error}");
-                std::process::exit(1);
-            }
-        };
+    let install = |kind| {
+        tokio::signal::unix::signal(kind).unwrap_or_else(|error| {
+            eprintln!("firepanda: cannot install shutdown signal handler: {error}");
+            std::process::exit(1);
+        })
+    };
+    let mut terminate = install(tokio::signal::unix::SignalKind::terminate());
+    let mut interrupt = install(tokio::signal::unix::SignalKind::interrupt());
     {
         // Like C++ `interrupt`: one flag wakes deadline reads, connect
         // retries, waitFor sleeps, and the stdio loop at once.

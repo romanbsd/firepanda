@@ -3,7 +3,6 @@
 //! behavior.
 
 use super::{Format, PageRequest, Stop};
-use crate::json::{ParseError, check_depth};
 use crate::tools::MAX_LINKS;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -175,14 +174,16 @@ impl Connection {
         }
     }
 
-    /// Send one command and wait for its reply; events observed along the way.
-    async fn call(
+    /// Write one command without waiting for its reply and return its id. A
+    /// reply nobody waits for is skipped by the next `call` like any other
+    /// non-matching id.
+    async fn send(
         &mut self,
         method: &str,
         params: Value,
         session: &str,
         deadline: Instant,
-    ) -> Result<Value, ScrapeError> {
+    ) -> Result<u64, ScrapeError> {
         self.next_id += 1;
         let id = self.next_id;
         // Build the envelope by moving `params`: a large Runtime.evaluate
@@ -210,6 +211,18 @@ impl Connection {
         if !matches!(sent, Ok(Ok(()))) {
             return Err(ScrapeError::fatal("Cannot write Lightpanda CDP command"));
         }
+        Ok(id)
+    }
+
+    /// Send one command and wait for its reply; events observed along the way.
+    async fn call(
+        &mut self,
+        method: &str,
+        params: Value,
+        session: &str,
+        deadline: Instant,
+    ) -> Result<Value, ScrapeError> {
+        let id = self.send(method, params, session, deadline).await?;
         loop {
             let mut response = self.receive(deadline).await.map_err(ScrapeError::fatal)?;
             let Some(object) = response.as_object() else {
@@ -261,12 +274,10 @@ impl Connection {
     }
 }
 
-/// CDP parse with the same 64-level stack bound as MCP input (C++
-/// `parse_json`), reported with the CDP wrapper message.
+/// CDP parse. serde_json's own 128-level recursion limit bounds the stack, so
+/// multi-megabyte extraction replies skip the separate depth pre-scan that MCP
+/// input needs for its distinct -32600 error.
 fn parse_message(text: &str) -> Result<Value, String> {
-    if let Err(ParseError::Nesting(message)) = check_depth(text.as_bytes()) {
-        return Err(format!("Invalid CDP JSON: {message}"));
-    }
     serde_json::from_str(text).map_err(|error| format!("Invalid CDP JSON: {error}"))
 }
 
@@ -533,8 +544,10 @@ pub async fn run_scrape(
     if let Some(status) = connection.http_status {
         apply_http_status(&mut result, status);
     }
+    // Fire and forget: the reply would only cost a round trip per page, and
+    // the next command on this connection skips it.
     connection
-        .call(
+        .send(
             "Target.disposeBrowserContext",
             json!({"browserContextId": target.context}),
             "",
@@ -553,7 +566,7 @@ mod tests {
         let deep = format!("{}0{}", "[".repeat(5000), "]".repeat(5000));
         let error = parse_message(&deep).unwrap_err();
         assert!(
-            error.contains("Invalid CDP JSON: JSON nesting exceeds 64 levels"),
+            error.contains("Invalid CDP JSON: recursion limit exceeded"),
             "{error}"
         );
         assert!(parse_message("[]").is_ok());

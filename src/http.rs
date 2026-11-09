@@ -30,14 +30,16 @@ pub fn client() -> Result<&'static primp::Client, String> {
 }
 
 /// Read a body up to `max_bytes`, failing as soon as the deadline expires.
+/// `label` prefixes error messages ("HTTP", "Search").
 pub async fn read_limited(
     mut response: primp::Response,
     max_bytes: usize,
     deadline: tokio::time::Instant,
+    label: &str,
 ) -> Result<Vec<u8>, String> {
     let declared = response.content_length();
     if declared.is_some_and(|length| length > u64::try_from(max_bytes).unwrap_or(u64::MAX)) {
-        return Err(too_large(max_bytes));
+        return Err(too_large(label, max_bytes));
     }
     let expected = usize::try_from(declared.unwrap_or(0))
         .unwrap_or(max_bytes)
@@ -46,21 +48,21 @@ pub async fn read_limited(
     loop {
         let chunk = tokio::time::timeout_at(deadline, response.chunk())
             .await
-            .map_err(|_| "HTTP request timed out".to_string())?
-            .map_err(|error| format!("HTTP response failed: {}", error.without_url()))?;
+            .map_err(|_| format!("{label} request timed out"))?
+            .map_err(|error| format!("{label} response failed: {}", error.without_url()))?;
         let Some(chunk) = chunk else {
             break;
         };
         if chunk.len() > max_bytes - body.len() {
-            return Err(too_large(max_bytes));
+            return Err(too_large(label, max_bytes));
         }
         body.extend_from_slice(&chunk);
     }
     Ok(body)
 }
 
-fn too_large(max_bytes: usize) -> String {
-    format!("HTTP response exceeds {} MiB", max_bytes / (1024 * 1024))
+fn too_large(label: &str, max_bytes: usize) -> String {
+    format!("{label} response exceeds {} MiB", max_bytes / (1024 * 1024))
 }
 
 /// UTF-8 is the normal case; a lossy decode only matters for malformed bodies.

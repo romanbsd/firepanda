@@ -13,10 +13,10 @@
 //! server instead of the network.
 
 use crate::http;
-use crate::json::as_integer;
-use crate::tools::normalize_url;
+use crate::tools::{bounded_integer, normalize_url};
 use scraper::{ElementRef, Html, Selector};
 use serde_json::{Value, json};
+use std::sync::LazyLock;
 use std::time::Duration;
 
 mod rate_limit;
@@ -41,10 +41,20 @@ pub const DESCRIPTION: &str = "Search the web without an API key using browser-i
                                requests to DuckDuckGo and Brave. Returns titles, URLs, and \
                                snippets.";
 
+/// Discriminants index the per-engine rate-limit slots.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Engine {
-    DuckDuckGo,
-    Brave,
+    DuckDuckGo = 0,
+    Brave = 1,
+}
+
+impl std::fmt::Display for Engine {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::DuckDuckGo => "DuckDuckGo",
+            Self::Brave => "Brave",
+        })
+    }
 }
 
 impl Engine {
@@ -112,20 +122,6 @@ impl Query {
             ),
         })
     }
-}
-
-/// Integer argument checked against its documented inclusive range.
-fn bounded_integer(value: &Value, name: &str, minimum: i64, maximum: i64) -> Result<i64, String> {
-    let Some(number) = as_integer(value) else {
-        return Err(format!("{name} must be an integer"));
-    };
-    let Ok(number) = i64::try_from(number) else {
-        return Err(format!("{name} is outside the supported range"));
-    };
-    if number < minimum || number > maximum {
-        return Err(format!("{name} is outside the supported range"));
-    }
-    Ok(number)
 }
 
 /// Schema row for `tools/list`; lives here so `tools.rs` stays table-driven.
@@ -262,9 +258,7 @@ async fn search_engine(
             return Err(format!("Search engine returned HTTP {status}"));
         }
         let body = http::text_or_lossy(
-            http::read_limited(response, MAX_BODY_BYTES, deadline)
-                .await
-                .map_err(|error| error.replace("HTTP response", "Search response"))?,
+            http::read_limited(response, MAX_BODY_BYTES, deadline, "Search").await?,
         );
         rate_limit::clear_cooldown(engine);
         return Ok(match engine {
@@ -299,9 +293,14 @@ fn dedupe(items: Vec<Item>, limit: usize) -> Vec<Value> {
     results
 }
 
-/// CSS selector construction is static; an invalid selector is a bug.
-fn selector(css: &str) -> Selector {
-    Selector::parse(css).unwrap_or_else(|_| panic!("Invalid search selector: {css}"))
+/// Parse each static CSS selector once per process; an invalid one is a bug.
+macro_rules! selector {
+    ($css:literal) => {{
+        static SELECTOR: LazyLock<Selector> = LazyLock::new(|| {
+            Selector::parse($css).expect(concat!("Invalid search selector: ", $css))
+        });
+        &*SELECTOR
+    }};
 }
 
 fn collapse(element: &ElementRef<'_>) -> String {
@@ -324,10 +323,10 @@ fn parse_ddg(document: &str, base: &str) -> Vec<Item> {
         return Vec::new();
     };
     let html = Html::parse_document(document);
-    let items = selector("div[class*=\"body\"]");
-    let titles = selector("h2");
-    let snippets = selector("a[class*=\"snippet\"], div[class*=\"snippet\"]");
-    let anchors = selector("a[href]");
+    let items = selector!("div[class*=\"body\"]");
+    let titles = selector!("h2");
+    let snippets = selector!("a[class*=\"snippet\"], div[class*=\"snippet\"]");
+    let anchors = selector!("a[href]");
     let mut results = Vec::new();
     for item in html.select(&items) {
         let Some(anchor) = item.select(&anchors).next() else {
@@ -367,12 +366,12 @@ fn parse_brave(document: &str, base: &str) -> Vec<Item> {
         return Vec::new();
     };
     let html = Html::parse_document(document);
-    let items = selector("div[data-type=\"web\"]");
-    let title_divs = selector("div[class*=\"title\"]");
-    let title_text = selector("div[class*=\"title\"], div[class*=\"sitename-container\"]");
-    let snippets = selector("div[class*=\"snippet\"] div[class*=\"content\"]");
-    let snippet_fallback = selector("div[class*=\"snippet\"]");
-    let anchors = selector("a[href]");
+    let items = selector!("div[data-type=\"web\"]");
+    let title_divs = selector!("div[class*=\"title\"]");
+    let title_text = selector!("div[class*=\"title\"], div[class*=\"sitename-container\"]");
+    let snippets = selector!("div[class*=\"snippet\"] div[class*=\"content\"]");
+    let snippet_fallback = selector!("div[class*=\"snippet\"]");
+    let anchors = selector!("a[href]");
     let mut results = Vec::new();
     for item in html.select(&items) {
         let Some(anchor) = item
