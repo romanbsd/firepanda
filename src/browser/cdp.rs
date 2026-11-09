@@ -17,6 +17,8 @@ const STOPPING: &str = "Service is stopping";
 const STOPPED: &str = "Lightpanda operation timed out or service is stopping";
 const TIMED_OUT: &str = "Lightpanda operation timed out";
 const DISCONNECTED: &str = "Lightpanda CDP disconnected or returned a non-text frame";
+/// Readiness budget held back from the extractor for the reply round trip.
+const READY_MARGIN: Duration = Duration::from_millis(250);
 
 /// CDP rejection (peer answered with an `error` object) versus transport,
 /// deadline, stop, and validation failures. Both surface as tool errors;
@@ -393,9 +395,12 @@ async fn extract(
     session: &str,
     deadline: Instant,
 ) -> Result<Value, ScrapeError> {
+    // Leave headroom so an in-page readiness timeout reaches us as its own
+    // error instead of losing the race to the CDP read deadline.
     let remaining = i64::try_from(
         deadline
             .saturating_duration_since(Instant::now())
+            .saturating_sub(READY_MARGIN)
             .as_millis(),
     )
     .unwrap_or(i64::MAX);

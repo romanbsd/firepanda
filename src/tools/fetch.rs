@@ -2,7 +2,7 @@
 //! other files bypass Lightpanda entirely; HTML is rejected with a pointer to
 //! `scrape`. Bodies are capped and every request runs under the tool deadline.
 
-use super::{Tool, find_option, normalize_url, parse_millis};
+use super::{Tool, check_keys, normalize_url, parse_millis};
 use crate::http;
 use base64::Engine;
 use serde_json::Value;
@@ -19,17 +19,7 @@ pub struct Request {
 
 impl Request {
     pub fn parse(args: &Value) -> Result<Self, String> {
-        let Some(object) = args.as_object() else {
-            return Err("arguments must be an object".to_string());
-        };
-        for key in object.keys() {
-            let Some(option) = find_option(key) else {
-                return Err(format!("Unknown argument: {key}"));
-            };
-            if option.applies & Tool::Fetch.bit() == 0 {
-                return Err(format!("Unknown argument: {key}"));
-            }
-        }
+        check_keys(args, Tool::Fetch)?;
         let url = args
             .get("url")
             .and_then(Value::as_str)

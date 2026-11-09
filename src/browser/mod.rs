@@ -7,7 +7,7 @@ mod cdp;
 use cdp::{Connection, ScrapeError};
 use serde::Serialize;
 use serde_json::Value;
-use std::os::fd::FromRawFd;
+use std::os::fd::AsFd;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::process::{Child, Command};
@@ -223,9 +223,7 @@ impl Browser {
             .map_err(ScrapeError::message)?;
         // Only healthy connections return to the pool; an error destroys this
         // one and `shutdown` reaps everything after it returns.
-        if connection.is_open() {
-            self.inner.free.lock().await.push(connection);
-        }
+        self.inner.free.lock().await.push(connection);
         // Inactivity starts after work completes, not when it starts.
         self.inner.process.lock().await.idle_since = Some(Instant::now());
         Ok(result)
@@ -250,7 +248,7 @@ impl Browser {
                 .map_err(ScrapeError::message);
             // Only healthy connections return to the pool; an error destroys
             // this one and the crawl loop reaps the browser after draining.
-            if result.is_ok() && connection.is_open() {
+            if result.is_ok() {
                 inner.free.lock().await.push(connection);
             }
             result
@@ -269,8 +267,28 @@ impl Browser {
         self.inner.stop.stopped()
     }
 
+    /// Resolve once shutdown is requested.
+    pub async fn wait_stopped(&self) {
+        self.inner.stop.wait().await;
+    }
+
     /// Pop a pooled connection or open a fresh one (C++ `checkout`).
     async fn checkout(&self, deadline: Instant) -> Result<Connection, String> {
+        if self.inner.owns_process {
+            // Pooled sockets outlive a crashed child and still look open; drop
+            // them so `connect` relaunches instead of failing the next page.
+            let alive = self
+                .inner
+                .process
+                .lock()
+                .await
+                .child
+                .as_mut()
+                .is_some_and(|child| matches!(child.try_wait(), Ok(None)));
+            if !alive {
+                self.inner.free.lock().await.clear();
+            }
+        }
         let pooled = self.inner.free.lock().await.pop();
         let mut connection = pooled.unwrap_or_else(|| Connection::new(self.inner.stop.clone()));
         self.connect(&mut connection, deadline).await?;
@@ -412,7 +430,7 @@ async fn attempt(socket: &str) -> Result<CdpStream, ()> {
         .unwrap_or(Err(()))
 }
 
-/// One spawn-failure message for both `dup` and `spawn` failures.
+/// One spawn-failure message for both stdout-clone and `spawn` failures.
 fn start_error(error: &std::io::Error) -> String {
     format!("Cannot start Lightpanda: {error}; use --lightpanda /path/to/lightpanda")
 }
@@ -436,11 +454,10 @@ fn launch(process: &mut Process) -> Result<(), String> {
     }
     let socket = process.options.socket.clone();
     let _ = std::fs::remove_file(&socket); // A stale socket would fail the bind.
-    let duplicate = unsafe { libc::dup(libc::STDERR_FILENO) };
-    if duplicate < 0 {
-        return Err(start_error(&std::io::Error::last_os_error()));
-    }
-    let stdout = unsafe { std::os::fd::OwnedFd::from_raw_fd(duplicate) };
+    let stdout = std::io::stderr()
+        .as_fd()
+        .try_clone_to_owned()
+        .map_err(|error| start_error(&error))?;
     let child = Command::new(&process.options.lightpanda)
         .arg("serve")
         .arg("--unix-socket")
@@ -473,14 +490,13 @@ async fn stop_child(process: &mut Process) {
     unsafe {
         libc::kill(pid as libc::pid_t, libc::SIGTERM);
     }
-    for _ in 0..50 {
-        match child.try_wait() {
-            Ok(Some(_)) | Err(_) => return,
-            Ok(None) => tokio::time::sleep(Duration::from_millis(10)).await,
-        }
+    if tokio::time::timeout(Duration::from_millis(500), child.wait())
+        .await
+        .is_err()
+    {
+        let _ = child.start_kill();
+        let _ = child.wait().await;
     }
-    let _ = child.start_kill();
-    let _ = child.wait().await;
 }
 
 /// mkdtemp("/tmp/firepanda-XXXXXX"): a private directory only this process

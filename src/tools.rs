@@ -451,18 +451,19 @@ pub fn origin(normalized: &str) -> &str {
         .map_or(normalized, |offset| &normalized[..after_scheme + offset])
 }
 
-pub fn parse_request(args: &Value, tool: Tool) -> Result<PageRequest, String> {
+/// Reject non-object arguments and keys the option table does not grant `tool`.
+fn check_keys(args: &Value, tool: Tool) -> Result<(), String> {
     let Some(object) = args.as_object() else {
         return Err("arguments must be an object".to_string());
     };
-    for key in object.keys() {
-        let Some(known) = find_option(key) else {
-            return Err(format!("Unknown argument: {key}"));
-        };
-        if known.applies & tool.bit() == 0 {
-            return Err(format!("Unknown argument: {key}"));
-        }
-    }
+    object
+        .keys()
+        .find(|key| find_option(key).is_none_or(|option| option.applies & tool.bit() == 0))
+        .map_or(Ok(()), |key| Err(format!("Unknown argument: {key}")))
+}
+
+pub fn parse_request(args: &Value, tool: Tool) -> Result<PageRequest, String> {
+    check_keys(args, tool)?;
     let url = args
         .get("url")
         .and_then(Value::as_str)
@@ -544,18 +545,28 @@ pub enum CallError {
     Tool(String),
 }
 
+/// Browser-free tools never see the stop flag on their own; abandon them on
+/// SIGTERM/SIGINT so shutdown does not wait out their timeouts.
+async fn until_stopped(
+    browser: &Browser,
+    work: impl Future<Output = Result<Value, String>>,
+) -> Result<Value, CallError> {
+    tokio::select! {
+        result = work => result.map_err(CallError::Tool),
+        () = browser.wait_stopped() => Err(CallError::Tool("Service is stopping".to_string())),
+    }
+}
+
 pub async fn execute(browser: &Browser, name: &str, args: &Value) -> Result<Value, CallError> {
     let tool = parse_tool(name).map_err(CallError::Invalid)?;
     if tool == Tool::Fetch {
         let request = fetch::Request::parse(args).map_err(CallError::Invalid)?;
-        return fetch::run(&request).await.map_err(CallError::Tool);
+        return until_stopped(browser, fetch::run(&request)).await;
     }
     // Search takes its own arguments (no URL), so it bypasses parse_request.
     if tool == Tool::Search {
         let query = crate::search::Query::parse(args).map_err(CallError::Invalid)?;
-        return crate::search::execute(&query)
-            .await
-            .map_err(CallError::Tool);
+        return until_stopped(browser, crate::search::execute(&query)).await;
     }
     let request = parse_request(args, tool).map_err(CallError::Invalid)?;
     if tool == Tool::Scrape {

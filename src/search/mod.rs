@@ -173,14 +173,13 @@ pub fn tool_definition() -> Value {
 
 /// Run one search, trying engines in order until one yields results.
 pub async fn execute(query: &Query) -> Result<Value, String> {
-    let both = [Engine::DuckDuckGo, Engine::Brave];
-    let single = [query.engine.unwrap_or(Engine::DuckDuckGo)];
-    let engines: &[Engine] = if query.engine.is_some() {
-        &single
-    } else {
-        &both
+    let engines: &[Engine] = match query.engine {
+        Some(Engine::DuckDuckGo) => &[Engine::DuckDuckGo],
+        Some(Engine::Brave) => &[Engine::Brave],
+        None => &[Engine::DuckDuckGo, Engine::Brave],
     };
     let deadline = tokio::time::Instant::now() + query.timeout;
+    // Every loop iteration overwrites this; the initial value is never returned.
     let mut last_error = String::new();
     for engine in engines {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -207,11 +206,7 @@ pub async fn execute(query: &Query) -> Result<Value, String> {
             Err(message) => last_error = message,
         }
     }
-    Err(if last_error.is_empty() {
-        "No search results".to_string()
-    } else {
-        last_error
-    })
+    Err(last_error)
 }
 
 fn endpoint(override_name: &str, default_url: &str) -> String {
@@ -325,6 +320,9 @@ fn collapse(element: &ElementRef<'_>) -> String {
 /// `DuckDuckGo` HTML endpoint: `//div[contains(@class,'body')]` items, `h2`
 /// title, first anchor href, snippet text.
 fn parse_ddg(document: &str, base: &str) -> Vec<Item> {
+    let Ok(base) = url::Url::parse(base) else {
+        return Vec::new();
+    };
     let html = Html::parse_document(document);
     let items = selector("div[class*=\"body\"]");
     let titles = selector("h2");
@@ -338,7 +336,7 @@ fn parse_ddg(document: &str, base: &str) -> Vec<Item> {
         let Some(href) = anchor.value().attr("href") else {
             continue;
         };
-        let Some(url) = result_url(href, base) else {
+        let Some(url) = result_url(href, &base) else {
             continue;
         };
         let title = item
@@ -365,6 +363,9 @@ fn parse_ddg(document: &str, base: &str) -> Vec<Item> {
 /// Brave search: `//div[@data-type='web']` items, last title div, anchor that
 /// wraps a title div, and `div.snippet div.content` text.
 fn parse_brave(document: &str, base: &str) -> Vec<Item> {
+    let Ok(base) = url::Url::parse(base) else {
+        return Vec::new();
+    };
     let html = Html::parse_document(document);
     let items = selector("div[data-type=\"web\"]");
     let title_divs = selector("div[class*=\"title\"]");
@@ -384,7 +385,7 @@ fn parse_brave(document: &str, base: &str) -> Vec<Item> {
         let Some(href) = anchor.value().attr("href") else {
             continue;
         };
-        let Some(url) = result_url(href, base) else {
+        let Some(url) = result_url(href, &base) else {
             continue;
         };
         let title = item
@@ -412,71 +413,28 @@ fn parse_brave(document: &str, base: &str) -> Vec<Item> {
 
 /// Resolve an engine href against the engine page and normalize it. Ad
 /// redirects and unsupported schemes are dropped.
-fn result_url(href: &str, base: &str) -> Option<String> {
+fn result_url(href: &str, base: &url::Url) -> Option<String> {
     let href = href.trim();
-    if href.is_empty() || href.starts_with('#') || href.starts_with("javascript:") {
-        return None;
-    }
-    let target = decode_uddg(href).unwrap_or_else(|| href.to_string());
-    if target.contains("duckduckgo.com/y.js") {
+    if href.is_empty() || href.starts_with('#') {
         return None;
     }
     // RFC 3986 resolution for absolute, protocol-relative, root-relative, and
-    // relative hrefs; `normalize_url` then applies Firepanda's own URL rules.
-    let base = url::Url::parse(base).ok()?;
-    let joined = base.join(&target).ok()?.to_string();
-    normalize_url(&joined).ok()
-}
-
-/// `DuckDuckGo` wraps results in `/l/?uddg=<encoded target>`; recover the target.
-fn decode_uddg(href: &str) -> Option<String> {
-    let marker = "uddg=";
-    let start = href.find(marker)? + marker.len();
-    let rest = &href[start..];
-    let end = rest.find('&').unwrap_or(rest.len());
-    Some(percent_decode(&rest[..end]))
-}
-
-fn percent_decode(input: &str) -> String {
-    let bytes = input.as_bytes();
-    let mut output = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'%' if index + 2 < bytes.len() => {
-                match (hex_value(bytes[index + 1]), hex_value(bytes[index + 2])) {
-                    // Keep bytes that would make the URL invalid (space and
-                    // controls) percent-encoded; the rest decode in place.
-                    (Some(high), Some(low)) if high * 16 + low > 32 && high * 16 + low != 127 => {
-                        output.push(high * 16 + low);
-                        index += 3;
-                    }
-                    (Some(_), Some(_)) => {
-                        output.extend_from_slice(&bytes[index..index + 3]);
-                        index += 3;
-                    }
-                    _ => {
-                        output.push(b'%');
-                        index += 1;
-                    }
-                }
-            }
-            byte => {
-                output.push(byte);
-                index += 1;
-            }
-        }
+    // relative hrefs; `normalize_url` then applies Firepanda's own URL rules
+    // (which also drop `javascript:` and other non-HTTP schemes).
+    let mut target = base.join(href).ok()?;
+    // `DuckDuckGo` wraps results in `/l/?uddg=<encoded target>`; the URL
+    // parser re-encodes anything the decoded target cannot carry raw.
+    let wrapped = target
+        .query_pairs()
+        .find(|(key, _)| key == "uddg")
+        .map(|(_, value)| value.into_owned());
+    if let Some(wrapped) = wrapped {
+        target = base.join(&wrapped).ok()?;
     }
-    http::text_or_lossy(output)
-}
-
-const fn hex_value(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
+    if target.as_str().contains("duckduckgo.com/y.js") {
+        return None;
     }
+    normalize_url(target.as_str()).ok()
 }
 
 #[cfg(test)]
@@ -593,30 +551,32 @@ mod tests {
 
     #[test]
     fn result_urls_cover_engine_href_shapes() {
+        let base = url::Url::parse(DDG_URL).expect("valid base");
+        let result_url = |href| result_url(href, &base);
         assert_eq!(
-            result_url("https://other.test/x", DDG_URL).as_deref(),
+            result_url("https://other.test/x").as_deref(),
             Some("https://other.test/x")
         );
         assert_eq!(
-            result_url("//cdn.test/x", DDG_URL).as_deref(),
+            result_url("//cdn.test/x").as_deref(),
             Some("https://cdn.test/x")
         );
         assert_eq!(
-            result_url("/root", DDG_URL).as_deref(),
+            result_url("/root").as_deref(),
             Some("https://html.duckduckgo.com/root")
         );
         assert_eq!(
-            result_url("child", DDG_URL).as_deref(),
+            result_url("child").as_deref(),
             Some("https://html.duckduckgo.com/html/child")
         );
         assert_eq!(
-            result_url("../up", DDG_URL).as_deref(),
+            result_url("../up").as_deref(),
             Some("https://html.duckduckgo.com/up")
         );
-        assert_eq!(result_url("javascript:void(0)", DDG_URL), None);
+        assert_eq!(result_url("javascript:void(0)"), None);
         assert_eq!(
-            percent_decode("https%3A%2F%2Fexample.com%2Fa%20b+c"),
-            "https://example.com/a%20b+c"
+            result_url("/l/?uddg=https%3A%2F%2Fexample.com%2Fa%20b%2Bc&rut=x").as_deref(),
+            Some("https://example.com/a%20b+c")
         );
     }
 }
