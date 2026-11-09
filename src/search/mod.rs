@@ -13,7 +13,7 @@
 //! server instead of the network.
 
 use crate::http;
-use crate::tools::{bounded_integer, normalize_url};
+use crate::tools::{bounded_integer, normalize_parsed};
 use scraper::{ElementRef, Html, Selector};
 use serde_json::{Value, json};
 use std::sync::LazyLock;
@@ -413,7 +413,7 @@ fn result_url(href: &str, base: &url::Url) -> Option<String> {
         return None;
     }
     // RFC 3986 resolution for absolute, protocol-relative, root-relative, and
-    // relative hrefs; `normalize_url` then applies Firepanda's own URL rules
+    // relative hrefs; `normalize_parsed` then applies Firepanda's own URL rules
     // (which also drop `javascript:` and other non-HTTP schemes).
     let mut target = base.join(href).ok()?;
     // `DuckDuckGo` wraps results in `/l/?uddg=<encoded target>`; the URL
@@ -428,7 +428,7 @@ fn result_url(href: &str, base: &url::Url) -> Option<String> {
     if target.as_str().contains("duckduckgo.com/y.js") {
         return None;
     }
-    normalize_url(target.as_str()).ok()
+    normalize_parsed(target).ok()
 }
 
 #[cfg(test)]

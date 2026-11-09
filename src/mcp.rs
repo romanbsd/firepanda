@@ -89,7 +89,11 @@ impl Server {
         if params.get("cursor").is_some() {
             return Err("No pagination cursor is supported".to_string());
         }
-        Ok(json!({"tools": tools::tools_list()}))
+        // One clone of the cached schemas; `json!` would serialize a second copy.
+        Ok(crate::json::object([(
+            "tools",
+            tools::tools_list().clone(),
+        )]))
     }
 
     async fn tools_call(&self, params: &Value) -> Result<Value, String> {

@@ -12,6 +12,8 @@ use std::time::Duration;
 
 /// Frontier cap for crawl/map link discovery (M4).
 pub const MAX_LINKS: usize = 10000;
+/// Longest accepted URL, before and after normalization.
+const MAX_URL_BYTES: usize = 8192;
 /// Serialization budget for crawl results.
 const MAX_CRAWL_BYTES: usize = 4 * 1024 * 1024;
 
@@ -347,111 +349,35 @@ fn parse_tool(name: &str) -> Result<Tool, String> {
         .ok_or_else(|| format!("Unknown tool: {name}"))
 }
 
-fn ascii_case_eq(value: &str, expected: &str) -> bool {
-    value.len() == expected.len()
-        && value
-            .bytes()
-            .zip(expected.bytes())
-            .all(|(actual, wanted)| actual.to_ascii_lowercase() == wanted)
-}
-
-/// Host, optional port, and the canonical IPv6 form, if any.
-struct Authority<'a> {
-    host: &'a str,
-    port: &'a str,
-    /// "[...]" after canonicalization; empty for names.
-    canonical_host: String,
-    has_port: bool,
-}
-
-fn parse_authority(authority: &str) -> Result<Authority<'_>, String> {
-    let (host, canonical_host) = if let Some(rest) = authority.strip_prefix('[') {
-        let Some(close) = rest.find(']') else {
-            return Err("Invalid IPv6 URL host".to_string());
-        };
-        let host = &authority[..close + 2];
-        let literal = &rest[..close];
-        let address: std::net::Ipv6Addr = literal
-            .parse()
-            .map_err(|_| "Invalid IPv6 URL host".to_string())?;
-        // Equivalent IPv6 spellings must not split the crawl's same-origin frontier.
-        (host, format!("[{address}]"))
-    } else {
-        let host = &authority[..authority.find(':').unwrap_or(authority.len())];
-        if !host.is_ascii() {
-            return Err("Internationalized hostnames must use punycode (xn--)".to_string());
-        }
-        let plain = !host.is_empty()
-            && host
-                .bytes()
-                .all(|c| c.is_ascii_alphanumeric() || c == b'.' || c == b'_' || c == b'-');
-        if !plain {
-            return Err("Use an absolute HTTP(S) URL without credentials".to_string());
-        }
-        (host, String::new())
-    };
-    let (port, has_port) = if host.len() == authority.len() {
-        ("", false)
-    } else {
-        if authority.as_bytes()[host.len()] != b':' {
-            return Err("Invalid URL authority".to_string());
-        }
-        (&authority[host.len() + 1..], true)
-    };
-    Ok(Authority {
-        host,
-        port,
-        canonical_host,
-        has_port,
-    })
-}
-
+/// WHATWG parsing (what Lightpanda and the extractor's `new URL()` use) plus
+/// Firepanda's rules. The pre-check matters: the parser would otherwise
+/// rewrite `\\` to `/` and accept `http://x\\@y`.
 pub fn normalize_url(input: &str) -> Result<String, String> {
-    if input.len() > 8192 || input.bytes().any(|c| c <= 32 || c == 127 || c == b'\\') {
+    if input.len() > MAX_URL_BYTES || input.bytes().any(|c| c <= 32 || c == 127 || c == b'\\') {
         return Err("Invalid URL characters or length".to_string());
     }
-    let Some(separator) = input.find("://") else {
-        return Err("Use an absolute HTTP(S) URL without credentials".to_string());
-    };
-    let scheme = &input[..separator];
-    let secure = ascii_case_eq(scheme, "https");
-    if !secure && !ascii_case_eq(scheme, "http") {
+    let url = url::Url::parse(input).map_err(|error| format!("Invalid URL: {error}"))?;
+    normalize_parsed(url)
+}
+
+/// Apply the scheme, credential, port, and length rules to an already parsed
+/// URL and drop its fragment. Serialized URLs never carry raw controls or
+/// backslashes, so only the length needs rechecking.
+pub fn normalize_parsed(mut url: url::Url) -> Result<String, String> {
+    if !matches!(url.scheme(), "http" | "https") {
         return Err("Only HTTP(S) URLs are supported".to_string());
     }
-    let host_start = separator + 3;
-    let host_end = input[host_start..]
-        .find(['/', '?', '#'])
-        .map(|offset| host_start + offset);
-    let authority = &input[host_start..host_end.unwrap_or(input.len())];
-    let parsed = parse_authority(authority)?;
-    let mut normalized = String::with_capacity(input.len() + 8);
-    normalized.push_str(if secure { "https://" } else { "http://" });
-    if !parsed.canonical_host.is_empty() {
-        normalized.push_str(&parsed.canonical_host);
-    } else if parsed.host.bytes().any(|c| c.is_ascii_uppercase()) {
-        normalized.push_str(&parsed.host.to_ascii_lowercase());
-    } else {
-        normalized.push_str(parsed.host);
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("URLs with credentials are not supported".to_string());
     }
-    // WHATWG treats an empty port ("http://x:/") as the scheme default.
-    if parsed.has_port && !parsed.port.is_empty() {
-        let port = parsed.port;
-        let digits = port.len() <= 5 && port.bytes().all(|b| b.is_ascii_digit());
-        let number: u64 = if digits { port.parse().unwrap() } else { 0 };
-        if !digits || number == 0 || number > 65535 {
-            return Err("Invalid URL port".to_string());
-        }
-        if !((secure && number == 443) || (!secure && number == 80)) {
-            normalized.push(':');
-            normalized.push_str(&number.to_string());
-        }
+    if url.port() == Some(0) {
+        return Err("Invalid URL port".to_string());
     }
-    let path = host_end.map_or("", |end| &input[end..]);
-    let path = &path[..path.find('#').unwrap_or(path.len())];
-    if path.is_empty() || path.starts_with('?') {
-        normalized.push('/');
+    url.set_fragment(None);
+    let normalized: String = url.into();
+    if normalized.len() > MAX_URL_BYTES {
+        return Err("Invalid URL characters or length".to_string());
     }
-    normalized.push_str(path);
     Ok(normalized)
 }
 
@@ -532,7 +458,7 @@ fn input_schema(tool: Tool) -> Value {
 }
 
 /// Immutable tool schemas; do not rebuild for every tools/list request.
-pub fn tools_list() -> Value {
+pub fn tools_list() -> &'static Value {
     use std::sync::OnceLock;
     static LIST: OnceLock<Value> = OnceLock::new();
     LIST.get_or_init(|| {
@@ -550,7 +476,6 @@ pub fn tools_list() -> Value {
             .collect();
         Value::Array(tools)
     })
-    .clone()
 }
 
 pub enum CallError {
@@ -632,11 +557,16 @@ mod tests {
             "http://[::1]/a"
         );
         assert_eq!(normalize_url("http://x:/a").unwrap(), "http://x/a");
-        assert!(
-            normalize_url("https://münchen.de/")
-                .unwrap_err()
-                .contains("punycode")
+        assert_eq!(
+            normalize_url("https://münchen.de/").unwrap(),
+            "https://xn--mnchen-3ya.de/"
         );
+        assert_eq!(
+            normalize_url("https://x/a/../b/./c").unwrap(),
+            "https://x/b/c"
+        );
+        assert!(normalize_url("https://x:0/").is_err());
+        assert!(normalize_url("https://user@x/").is_err());
     }
 
     #[test]

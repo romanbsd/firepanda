@@ -61,21 +61,28 @@ pub async fn run(request: &Request) -> Result<Value, String> {
         ("contentType", Value::String(content_type)),
         ("size", Value::from(size)),
     ]);
-    let textual = if is_text(&mime) {
-        true
-    } else if mime.is_empty() || mime == "application/octet-stream" {
-        sniff_text(&bytes)
+    // Unknown/binary media types: a NUL-free valid UTF-8 body is text, which
+    // covers JSON/Markdown served as `application/octet-stream`. Validating
+    // by conversion keeps the bytes on failure instead of checking twice.
+    let unknown = mime.is_empty() || mime == "application/octet-stream";
+    let body = if is_text(&mime) {
+        Ok(http::text_or_lossy(bytes))
+    } else if unknown && !bytes.contains(&0) {
+        String::from_utf8(bytes).map_err(std::string::FromUtf8Error::into_bytes)
     } else {
-        false
+        Err(bytes)
     };
-    if textual {
-        payload["encoding"] = Value::String("text".to_string());
-        payload["text"] = Value::String(http::text_or_lossy(bytes));
-    } else {
-        let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
-        drop(bytes); // Free the raw body before the reply is serialized.
-        payload["encoding"] = Value::String("base64".to_string());
-        payload["base64"] = Value::String(encoded);
+    match body {
+        Ok(text) => {
+            payload["encoding"] = Value::String("text".to_string());
+            payload["text"] = Value::String(text);
+        }
+        Err(bytes) => {
+            let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            drop(bytes); // Free the raw body before the reply is serialized.
+            payload["encoding"] = Value::String("base64".to_string());
+            payload["base64"] = Value::String(encoded);
+        }
     }
     Ok(payload)
 }
@@ -114,12 +121,6 @@ fn is_text(mime: &str) -> bool {
         || (mime.ends_with("+xml") && !is_html(mime))
 }
 
-/// Unknown/binary media types: treat a NUL-free valid UTF-8 body as text, which
-/// covers JSON/Markdown served as `application/octet-stream`.
-fn sniff_text(bytes: &[u8]) -> bool {
-    !bytes.contains(&0) && std::str::from_utf8(bytes).is_ok()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,8 +140,6 @@ mod tests {
         assert!(!is_text("image/png"));
         assert!(!is_text("application/pdf"));
         assert!(is_html("application/xhtml+xml"));
-        assert!(sniff_text(b"{\"ok\":true}"));
-        assert!(!sniff_text(b"\x89PNG\r\n\x1a\n\0"));
     }
 
     #[test]
