@@ -159,7 +159,7 @@ mod tests {
     }
 
     /// Port of the historical JSON size-boundary suite: every limit boundary
-    /// around the exact serialized size, for the same value zoo the C++ suite walks.
+    /// around the exact serialized size, across a zoo of value shapes.
     fn check(value: &serde_json::Value) {
         let expected = serde_json::to_string(value).unwrap().len();
         assert_eq!(serialized_size_within(value, expected), Some(expected));
@@ -198,7 +198,6 @@ mod tests {
         }
         check(&json!({"text": "\n".repeat(256 * 1024)}));
         check(&json!({"text": "x".repeat(4 * 1024 * 1024)}));
-        // The C++ suite's invalid-UTF-8 `dump()` error has no Rust equivalent:
         // Value::String is UTF-8 by construction, and serialization of a
         // Value cannot fail.
         assert_eq!(

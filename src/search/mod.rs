@@ -124,13 +124,10 @@ impl Query {
     }
 }
 
-/// Schema row for `tools/list`; lives here so `tools.rs` stays table-driven.
-pub fn tool_definition() -> Value {
+/// Input schema for `tools/list`; the tool table supplies name, title, and
+/// annotations like every other tool.
+pub fn input_schema() -> Value {
     json!({
-        "name": "search",
-        "title": "Search the web",
-        "description": DESCRIPTION,
-        "inputSchema": {
             "type": "object",
             "properties": {
                 "query": {
@@ -162,8 +159,6 @@ pub fn tool_definition() -> Value {
             },
             "required": ["query"],
             "additionalProperties": false,
-        },
-        "annotations": crate::tools::annotations(),
     })
 }
 
@@ -328,8 +323,8 @@ fn parse_ddg(document: &str, base: &str) -> Vec<Item> {
     let snippets = selector!("a[class*=\"snippet\"], div[class*=\"snippet\"]");
     let anchors = selector!("a[href]");
     let mut results = Vec::new();
-    for item in html.select(&items) {
-        let Some(anchor) = item.select(&anchors).next() else {
+    for item in html.select(items) {
+        let Some(anchor) = item.select(anchors).next() else {
             continue;
         };
         let Some(href) = anchor.value().attr("href") else {
@@ -339,12 +334,12 @@ fn parse_ddg(document: &str, base: &str) -> Vec<Item> {
             continue;
         };
         let title = item
-            .select(&titles)
+            .select(titles)
             .next()
             .map(|element| collapse(&element))
             .unwrap_or_default();
         let description = item
-            .select(&snippets)
+            .select(snippets)
             .next()
             .map_or_else(|| collapse(&anchor), |element| collapse(&element));
         if title.is_empty() || description.is_empty() {
@@ -373,11 +368,11 @@ fn parse_brave(document: &str, base: &str) -> Vec<Item> {
     let snippet_fallback = selector!("div[class*=\"snippet\"]");
     let anchors = selector!("a[href]");
     let mut results = Vec::new();
-    for item in html.select(&items) {
+    for item in html.select(items) {
         let Some(anchor) = item
-            .select(&anchors)
-            .find(|anchor| anchor.select(&title_divs).next().is_some())
-            .or_else(|| item.select(&anchors).next())
+            .select(anchors)
+            .find(|anchor| anchor.select(title_divs).next().is_some())
+            .or_else(|| item.select(anchors).next())
         else {
             continue;
         };
@@ -388,14 +383,14 @@ fn parse_brave(document: &str, base: &str) -> Vec<Item> {
             continue;
         };
         let title = item
-            .select(&title_text)
+            .select(title_text)
             .last()
             .map(|element| collapse(&element))
             .unwrap_or_default();
         let description = item
-            .select(&snippets)
+            .select(snippets)
             .next()
-            .or_else(|| item.select(&snippet_fallback).next())
+            .or_else(|| item.select(snippet_fallback).next())
             .map(|element| collapse(&element))
             .unwrap_or_default();
         if title.is_empty() || description.is_empty() {

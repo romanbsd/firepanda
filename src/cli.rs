@@ -1,5 +1,5 @@
 //! CLI parsing: exit codes (2 for option validation, 0 for --help/--version)
-//! and stderr messages mirror the historical C++ CLI.
+//! and stderr messages are part of the CLI contract.
 
 use crate::browser::Options;
 use std::time::Duration;
@@ -11,8 +11,7 @@ Managed browser idle timeout: 60 seconds by default; 0 disables it.
 MCP over stdio; starts native Lightpanda lazily unless --socket is given.
 ";
 
-/// Strict idle-timeout parse: ASCII digits only, 0..=86400. Mirrors C++
-/// `std::from_chars` into `unsigned` — rejects "+1", "-1", "1.5", " 1",
+/// Strict idle-timeout parse: ASCII digits only, 0..=86400. Rejects "+1", "-1", "1.5", " 1",
 /// "1 ", "nan", "86401", and anything that overflows.
 fn parse_idle_timeout(value: &str) -> Option<u64> {
     if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
@@ -25,6 +24,7 @@ fn parse_idle_timeout(value: &str) -> Option<u64> {
 pub fn parse() -> Options {
     let mut options = Options::default();
     let mut args = std::env::args().skip(1);
+    let mut lightpanda_given = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--help" => {
@@ -53,6 +53,7 @@ pub fn parse() -> Options {
                     std::process::exit(2);
                 };
                 if arg == "--lightpanda" {
+                    lightpanda_given = true;
                     options.lightpanda = value;
                 } else {
                     options.socket = value;
@@ -63,6 +64,10 @@ pub fn parse() -> Options {
                 std::process::exit(2);
             }
         }
+    }
+    if lightpanda_given && !options.socket.is_empty() {
+        eprintln!("--lightpanda and --socket are mutually exclusive");
+        std::process::exit(2);
     }
     if !options.socket.is_empty()
         && (!options.socket.starts_with('/') || options.socket.len() > 100)

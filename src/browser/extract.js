@@ -159,7 +159,8 @@
         // Exactly 10,000 links is complete; flag truncation only when another is dropped.
         if (data.links.length === options.maxLinks) { data.linksTruncated = true; break; }
         seen.add(url);
-        data.links.push({url, title:(a.textContent || '').trim()});
+        // Card-style anchors wrap whole blocks; a title is a label, not content.
+        data.links.push({url, title:(a.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 256)});
       }
     }
   }

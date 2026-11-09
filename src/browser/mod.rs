@@ -17,11 +17,11 @@ use tokio::sync::{Mutex, watch};
 type CdpStream = tokio_tungstenite::WebSocketStream<tokio::net::UnixStream>;
 
 /// Reconnect window for a managed browser that is still coming up; bounded by
-/// the scrape's own deadline as well (C++ `checkout` argument).
+/// the scrape's own deadline as well.
 const CONNECT_WINDOW: Duration = Duration::from_secs(10);
-/// One connect+handshake attempt: C++ sets 100 ms connection/read timeouts.
+/// One connect+handshake attempt.
 const CONNECT_ATTEMPT: Duration = Duration::from_millis(100);
-/// Pause between managed connect retries (C++ sleeps 20 ms).
+/// Pause between managed connect retries.
 const CONNECT_RETRY: Duration = Duration::from_millis(20);
 
 const STOPPING: &str = "Service is stopping";
@@ -106,43 +106,33 @@ pub struct PageRequest {
 }
 
 /// Shutdown flag shared by the stdio loop, connect retries, deadline reads,
-/// and waitFor sleeps. The C++ self-pipe + `stop_requested` atomic plays this
-/// role; a watch channel wakes every waiter at once.
+/// and waitFor sleeps; a watch channel wakes every waiter at once.
 #[derive(Clone)]
-pub struct Stop {
-    sender: Arc<watch::Sender<bool>>,
-    receiver: watch::Receiver<bool>,
-}
+pub struct Stop(Arc<watch::Sender<bool>>);
 
 impl Stop {
     pub fn channel() -> Self {
-        let (sender, receiver) = watch::channel(false);
-        Self {
-            sender: Arc::new(sender),
-            receiver,
-        }
+        Self(Arc::new(watch::channel(false).0))
     }
 
-    /// Called from the SIGTERM/SIGINT task (C++ `interrupt`).
+    /// Called from the SIGTERM/SIGINT task. `send_replace` stores the flag
+    /// even while no waiter is subscribed.
     pub fn notify(&self) {
-        let _ = self.sender.send(true);
+        self.0.send_replace(true);
     }
 
     pub fn stopped(&self) -> bool {
-        *self.receiver.borrow()
+        *self.0.borrow()
     }
 
-    /// Resolve once shutdown is requested. Each waiter uses its own receiver
-    /// clone so one waiter consuming the notification cannot starve another.
+    /// Resolve once shutdown is requested; returns at once if it already was.
     pub async fn wait(&self) {
-        let mut receiver = self.receiver.clone();
-        let _ = receiver.changed().await;
+        let _ = self.0.subscribe().wait_for(|&stopped| stopped).await;
     }
 }
 
-/// Child process, socket directory, and idle bookkeeping. C++ touched this
-/// only on the main thread between requests; the async mutex covers the same
-/// exclusivity while launch/connect run concurrently in M4.
+/// Child process, socket directory, and idle bookkeeping, behind one async
+/// mutex so concurrent crawl checkouts never race a launch or connect.
 struct Process {
     options: Options,
     directory: String,
@@ -229,8 +219,7 @@ impl Browser {
         Ok(result)
     }
 
-    /// Fetch one page on a pool connection for the crawl loop (C++
-    /// `scrape_async`). The dispatch task checks out inline — launching the
+    /// Fetch one page on a pool connection for the crawl loop. The dispatch task checks out inline — launching the
     /// managed browser if needed — so concurrent pages can never race a second
     /// spawn; a checkout failure surfaces as `Failed` without releasing the
     /// browser, which the crawl loop reaps after draining siblings.
@@ -255,14 +244,13 @@ impl Browser {
         }))
     }
 
-    /// Inactivity starts after work completes, not when it starts (C++
-    /// `page_completed`; main thread only, between dispatch and recording).
+    /// Inactivity starts after work completes, not when it starts. Called by
+    /// the crawl loop between dispatch and recording.
     pub async fn page_completed(&self) {
         self.inner.process.lock().await.idle_since = Some(Instant::now());
     }
 
-    /// Stop flag for the crawl loop's dispatch condition (C++
-    /// `stop_requested`).
+    /// Stop flag for the crawl loop's dispatch condition.
     pub fn stopped(&self) -> bool {
         self.inner.stop.stopped()
     }
@@ -272,7 +260,7 @@ impl Browser {
         self.inner.stop.wait().await;
     }
 
-    /// Pop a pooled connection or open a fresh one (C++ `checkout`).
+    /// Pop a pooled connection or open a fresh one.
     async fn checkout(&self, deadline: Instant) -> Result<Connection, String> {
         if self.inner.owns_process {
             // Pooled sockets outlive a crashed child and still look open; drop
@@ -322,7 +310,7 @@ impl Browser {
                 return Ok(());
             }
             if !owns_process {
-                break; // External peers get exactly one attempt (C++ `own` check).
+                break; // External peers get exactly one attempt.
             }
             let gone = process
                 .child
@@ -348,7 +336,7 @@ impl Browser {
     /// Drop pooled connections, stop an owned child, and remove the private
     /// socket directory. External `--socket` mode keeps its socket path: only
     /// the pool is cleared. Called after failures, on idle expiry, and when
-    /// the service exits (C++ `release()`).
+    /// the service exits.
     pub async fn shutdown(&self) {
         self.inner.free.lock().await.clear();
         let mut process = self.inner.process.lock().await;
@@ -405,14 +393,14 @@ impl Drop for Browser {
 const MAX_WS_MESSAGE: usize = 16 * 1024 * 1024;
 
 /// One connect+handshake attempt against the CDP Unix socket, capped at the
-/// C++ connection/read timeout so a stalled peer cannot outlive the loop.
+/// `CONNECT_ATTEMPT` so a stalled peer cannot outlive the loop.
 async fn attempt(socket: &str) -> Result<CdpStream, ()> {
     let connect = async {
         let stream = tokio::net::UnixStream::connect(socket)
             .await
             .map_err(|_| ())?;
-        // Handshake over our own stream; Host stays localhost like the C++
-        // direct hostname/address map. Lightpanda exposes a plain WebSocket,
+        // Handshake over our own stream; the Host header stays localhost.
+        // Lightpanda exposes a plain WebSocket,
         // so this is HTTP/1.1 Upgrade over the UDS (HTTP/2 extended CONNECT
         // is not used).
         let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
@@ -437,7 +425,7 @@ fn start_error(error: &std::io::Error) -> String {
 
 /// Spawn the managed browser: `lightpanda serve --unix-socket … --log-level
 /// error`, stdin /dev/null, stdout redirected to stderr so a browser log can
-/// never corrupt the MCP byte stream (C++ `posix_spawn` file actions).
+/// never corrupt the MCP byte stream.
 fn launch(process: &mut Process) -> Result<(), String> {
     let running = process
         .child
@@ -448,6 +436,7 @@ fn launch(process: &mut Process) -> Result<(), String> {
     }
     process.child = None;
     if process.directory.is_empty() {
+        sweep_orphans(std::path::Path::new(SOCKET_ROOT));
         let directory = make_socket_directory()?;
         process.options.socket = format!("{directory}/cdp.sock");
         process.directory = directory;
@@ -470,11 +459,67 @@ fn launch(process: &mut Process) -> Result<(), String> {
         .kill_on_drop(false)
         .spawn()
         .map_err(|error| start_error(&error))?;
+    // Record ownership so a later firepanda can reap this browser if we die
+    // without cleanup. Best effort: a missing file only skips that sweep.
+    if let Some(pid) = child.id() {
+        let owner = format!("{} {pid}", std::process::id());
+        let _ = std::fs::write(format!("{}/{OWNER_FILE}", process.directory), owner);
+    }
     process.child = Some(child);
     Ok(())
 }
 
-/// SIGTERM, 500 ms to exit, then SIGKILL — C++ `Browser::Impl::stop_child`.
+const SOCKET_ROOT: &str = "/tmp";
+const OWNER_FILE: &str = "owner";
+
+/// Reap browsers left by a firepanda that died without cleanup (SIGKILL,
+/// abort): each socket directory names its owner and browser PIDs. Only dead
+/// owners are swept, and the browser is signalled only while its socket still
+/// accepts connections, which proves that PID has not been reused.
+/// ponytail: runs only when a browser launches; Linux `PR_SET_PDEATHSIG` would
+/// reap immediately but does not exist on macOS.
+fn sweep_orphans(root: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with("firepanda-")
+        {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(owner) = std::fs::read_to_string(path.join(OWNER_FILE)) else {
+            continue; // Not ours, still starting, or from an older version.
+        };
+        let mut pids = owner
+            .split_whitespace()
+            .filter_map(|pid| pid.parse::<libc::pid_t>().ok());
+        let (Some(parent), Some(browser)) = (pids.next(), pids.next()) else {
+            continue;
+        };
+        if parent <= 0 || browser <= 0 || process_exists(parent) {
+            continue;
+        }
+        if std::os::unix::net::UnixStream::connect(path.join("cdp.sock")).is_ok() {
+            unsafe {
+                libc::kill(browser, libc::SIGTERM);
+            }
+        }
+        let _ = std::fs::remove_dir_all(&path);
+    }
+}
+
+/// `kill(pid, 0)`: only ESRCH proves the process is gone (EPERM means it
+/// exists under another user).
+fn process_exists(pid: libc::pid_t) -> bool {
+    let status = unsafe { libc::kill(pid, 0) };
+    status == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
+/// SIGTERM, 500 ms to exit, then SIGKILL.
 async fn stop_child(process: &mut Process) {
     let Some(mut child) = process.child.take() else {
         return;
@@ -499,8 +544,8 @@ async fn stop_child(process: &mut Process) {
     }
 }
 
-/// mkdtemp("/tmp/firepanda-XXXXXX"): a private directory only this process
-/// puts its socket in (C++ `launch`).
+/// mkdtemp("/tmp/firepanda-XXXXXX") under `SOCKET_ROOT`: a private directory only this process
+/// puts its socket in.
 fn make_socket_directory() -> Result<String, String> {
     let mut template = b"/tmp/firepanda-XXXXXX\0".to_vec();
     let created = unsafe { libc::mkdtemp(template.as_mut_ptr().cast()) };
@@ -523,6 +568,31 @@ mod tests {
         assert_ne!(first, second);
         std::fs::remove_dir_all(&first).unwrap();
         std::fs::remove_dir_all(&second).unwrap();
+    }
+
+    #[test]
+    fn sweep_removes_only_directories_of_dead_owners() {
+        let root = make_socket_directory().unwrap();
+        let root = std::path::Path::new(&root);
+        let mut exited = std::process::Command::new("true").spawn().unwrap();
+        let dead = exited.id();
+        exited.wait().unwrap();
+        let live = std::process::id();
+        for (name, owner) in [
+            ("firepanda-dead", format!("{dead} {dead}")),
+            ("firepanda-live", format!("{live} {dead}")),
+            ("firepanda-unowned", String::new()),
+        ] {
+            std::fs::create_dir(root.join(name)).unwrap();
+            if !owner.is_empty() {
+                std::fs::write(root.join(name).join(OWNER_FILE), owner).unwrap();
+            }
+        }
+        sweep_orphans(root);
+        assert!(!root.join("firepanda-dead").exists());
+        assert!(root.join("firepanda-live").exists());
+        assert!(root.join("firepanda-unowned").exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

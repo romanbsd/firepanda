@@ -15,8 +15,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 const READ_CHUNK: usize = 8192;
 
 /// Idle expiry as a select arm: no deadline (idle timeout disabled, external
-/// socket, or no browser yet) waits forever, like C++ `wait_for_input` with a
-/// null timeout.
+/// socket, or no browser yet) waits forever.
 async fn idle_wait(deadline: Option<tokio::time::Instant>) {
     match deadline {
         Some(deadline) => tokio::time::sleep_until(deadline).await,
@@ -24,7 +23,7 @@ async fn idle_wait(deadline: Option<tokio::time::Instant>) {
     }
 }
 
-/// Stdio loop with the same structure as C++ `main`: buffered chunked reads,
+/// Stdio loop: buffered chunked reads,
 /// bounded line assembly, per-line idle shutdown, and prompt exits on EOF (0),
 /// shutdown signals (0), or a closed stdout (1).
 async fn serve(options: browser::Options, stop: browser::Stop) -> i32 {
@@ -40,7 +39,7 @@ async fn serve(options: browser::Options, stop: browser::Stop) -> i32 {
             break;
         }
         // One lock per turn: expiry and the next deadline come from the same
-        // snapshot (C++ `wait_for_input(idle_deadline)`).
+        // snapshot.
         let idle = server.idle_deadline().await.map(tokio::time::Instant::from);
         let count = tokio::select! {
             () = stop.wait() => break,
@@ -49,7 +48,7 @@ async fn serve(options: browser::Options, stop: browser::Stop) -> i32 {
                 Ok(0) => break,
                 Ok(count) => count,
                 // Retry only interrupts; every other failure ends the loop
-                // exactly like a closed stdin (C++ `count <= 0`).
+                // exactly like a closed stdin.
                 Err(ref error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(_) => break,
             },
@@ -112,7 +111,7 @@ async fn serve(options: browser::Options, stop: browser::Stop) -> i32 {
             }
         }
     }
-    // C++ `Server` destructor: stop the managed child and remove its socket
+    // Stop the managed child and remove its socket
     // directory before the process exits.
     server.shutdown().await;
     exit_code
@@ -131,7 +130,7 @@ async fn main() {
     let mut terminate = install(tokio::signal::unix::SignalKind::terminate());
     let mut interrupt = install(tokio::signal::unix::SignalKind::interrupt());
     {
-        // Like C++ `interrupt`: one flag wakes deadline reads, connect
+        // One flag wakes deadline reads, connect
         // retries, waitFor sleeps, and the stdio loop at once.
         let stop = stop.clone();
         tokio::spawn(async move {

@@ -51,7 +51,7 @@ impl Server {
         self.browser.expire_if_idle().await
     }
 
-    /// Tear the browser down when the service exits (C++ destructor path).
+    /// Tear the browser down when the service exits.
     pub async fn shutdown(&self) {
         self.browser.shutdown().await;
     }
@@ -70,7 +70,7 @@ impl Server {
             );
         }
         let requested = params["protocolVersion"].as_str().unwrap_or_default();
-        // Same negotiation as C++: the modern revision itself and any unknown
+        // The modern revision itself and any unknown
         // version fall back to the legacy initialize handshake.
         let negotiated = if requested == PROTOCOL_VERSION || !VERSIONS.contains(&requested) {
             FALLBACK_PROTOCOL_VERSION
@@ -338,7 +338,7 @@ mod tests {
 
     #[tokio::test]
     async fn tool_errors_carry_no_structured_content() {
-        // Matches C++: browser failures become isError results, and only
+        // Browser failures become isError results, and only
         // successful (small) payloads repeat into structuredContent.
         let mut server = server();
         let response = server

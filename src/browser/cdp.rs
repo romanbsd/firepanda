@@ -16,6 +16,7 @@ const STOPPING: &str = "Service is stopping";
 const STOPPED: &str = "Lightpanda operation timed out or service is stopping";
 const TIMED_OUT: &str = "Lightpanda operation timed out";
 const DISCONNECTED: &str = "Lightpanda CDP disconnected or returned a non-text frame";
+const TOO_LARGE: &str = "Lightpanda reply exceeds 16 MiB; request fewer formats";
 /// Readiness budget held back from the extractor for the reply round trip.
 const READY_MARGIN: Duration = Duration::from_millis(250);
 
@@ -104,8 +105,8 @@ impl Connection {
                 () = tokio::time::sleep_until(deadline.into()) => return Err(TIMED_OUT.to_string()),
                 message = ws.next() => message,
             };
-            // A read finishing at/after the deadline failed like the C++
-            // SocketDeadline shutdown, not like a clean timeout.
+            // A read finishing at/after the deadline counts as a failed read,
+            // not a clean timeout.
             if self.stop.stopped() || Instant::now() >= deadline {
                 return Err(STOPPED.to_string());
             }
@@ -121,6 +122,10 @@ impl Connection {
                         .map_err(|_| DISCONNECTED.to_string())?;
                 }
                 Some(Ok(Message::Pong(_) | Message::Frame(_))) => {}
+                // The WebSocket size cap, not a crash: say what to change.
+                Some(Err(tokio_tungstenite::tungstenite::Error::Capacity(_))) => {
+                    return Err(TOO_LARGE.to_string());
+                }
                 Some(Ok(Message::Close(_) | Message::Binary(_)) | Err(_)) => {
                     return Err(DISCONNECTED.to_string());
                 }
@@ -153,7 +158,7 @@ impl Connection {
             return;
         };
         // Status must be an integer 100..=599: 201.5 and 99/600 never become
-        // an httpStatus (C++ compares get<int> back against the number).
+        // an httpStatus.
         let number = match response.get("status").and_then(Value::as_i64) {
             Some(status) if (100..=599).contains(&status) => status,
             _ => return,
@@ -203,7 +208,7 @@ impl Connection {
             .as_mut()
             .ok_or_else(|| ScrapeError::fatal(DISCONNECTED))?;
         // The deadline owns writes too: a peer that stops reading must not
-        // outlive the operation (C++ SocketDeadline shuts the socket down).
+        // outlive the operation.
         let sent = tokio::select! {
             () = self.stop.wait() => return Err(ScrapeError::fatal(STOPPING)),
             sent = tokio::time::timeout_at(deadline.into(), ws.send(Message::text(payload))) => sent,
@@ -229,7 +234,7 @@ impl Connection {
                 return Err(ScrapeError::fatal("CDP response must be an object"));
             };
             match object.get("id") {
-                // No id (0 in C++) can never match; keep observing.
+                // No id can never match; keep observing.
                 None => {
                     self.observe(&response);
                     continue;
@@ -274,7 +279,7 @@ impl Connection {
     }
 }
 
-/// CDP parse. serde_json's own 128-level recursion limit bounds the stack, so
+/// CDP parse. `serde_json`'s own 128-level recursion limit bounds the stack, so
 /// multi-megabyte extraction replies skip the separate depth pre-scan that MCP
 /// input needs for its distinct -32600 error.
 fn parse_message(text: &str) -> Result<Value, String> {

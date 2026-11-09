@@ -30,7 +30,7 @@ pub fn client() -> Result<&'static primp::Client, String> {
 }
 
 /// Read a body up to `max_bytes`, failing as soon as the deadline expires.
-/// `label` prefixes error messages ("HTTP", "Search").
+/// `label` prefixes error messages ("Fetch", "Search").
 pub async fn read_limited(
     mut response: primp::Response,
     max_bytes: usize,

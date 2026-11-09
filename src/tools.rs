@@ -53,7 +53,7 @@ struct ToolDef {
 
 /// MCP behavior hints shared by every tool: all are read-only, idempotent
 /// network readers with no destructive side effects.
-pub fn annotations() -> Value {
+fn annotations() -> Value {
     json!({
         "readOnlyHint": true,
         "destructiveHint": false,
@@ -513,6 +513,24 @@ pub fn parse_request(args: &Value, tool: Tool) -> Result<PageRequest, String> {
     Ok(request)
 }
 
+/// Search takes its own arguments; every other tool derives from `OPTIONS`.
+fn input_schema(tool: Tool) -> Value {
+    if tool == Tool::Search {
+        return crate::search::input_schema();
+    }
+    let properties: serde_json::Map<String, Value> = OPTIONS
+        .iter()
+        .filter(|option| option.applies & tool.bit() != 0)
+        .map(|option| (option.name.to_string(), schema_of(option)))
+        .collect();
+    json!({
+        "type": "object",
+        "properties": properties,
+        "required": ["url"],
+        "additionalProperties": false,
+    })
+}
+
 /// Immutable tool schemas; do not rebuild for every tools/list request.
 pub fn tools_list() -> Value {
     use std::sync::OnceLock;
@@ -521,26 +539,11 @@ pub fn tools_list() -> Value {
         let tools: Vec<Value> = TOOL_TABLE
             .iter()
             .map(|entry| {
-                if entry.id == Tool::Search {
-                    return crate::search::tool_definition();
-                }
-                let mut properties = serde_json::Map::new();
-                for option in &OPTIONS {
-                    if option.applies & entry.id.bit() == 0 {
-                        continue;
-                    }
-                    properties.insert(option.name.to_string(), schema_of(option));
-                }
                 json!({
                     "name": entry.name,
                     "title": entry.title,
                     "description": entry.description,
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": properties,
-                        "required": ["url"],
-                        "additionalProperties": false,
-                    },
+                    "inputSchema": input_schema(entry.id),
                     "annotations": annotations(),
                 })
             })

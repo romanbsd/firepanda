@@ -13,9 +13,9 @@ use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// Fixed crawl/map budget (C++ `Clock::now() + 120s`).
+/// Fixed crawl/map budget.
 const CRAWL_BUDGET: Duration = Duration::from_secs(120);
-/// Remaining budget below this stops dispatching (C++ `< 100ms`).
+/// Remaining budget below this stops dispatching.
 const DISPATCH_FLOOR: Duration = Duration::from_millis(100);
 
 /// One dispatched page awaiting consumption, in dispatch order.
@@ -290,7 +290,7 @@ pub async fn run(
             browser.shutdown().await;
         }
     }
-    // Like the C++ Drain scope: wait for pages still in flight on a stop so
+    // Wait for pages still in flight on a stop so
     // teardown can never race a page worker; their results are discarded.
     while let Some(item) = inflight.pop_front() {
         if let PageTask::Running(handle) = item.task {
