@@ -135,6 +135,15 @@ try:
     assert f'[Fragment](<{url}/assets/#part>)' in extracted["markdown"], extracted
     assert {link['url'] for link in extracted['links']} == {url + '/assets/', url + '/assets/child'}, extracted
     assert 'Invalid' in extracted['markdown'] and 'mailto:' not in extracted['markdown'], extracted
+    structure = tool("scrape", url=url + "/markdown-structure")["markdown"]
+    assert "\\# not a heading" in structure and "1\\. not a list" in structure, structure
+    assert "3. three\n4. four\n\n   - nested" in structure, structure
+    assert "| Name | Note |\n| --- | --- |\n| a\\|b | x |" in structure, structure
+    assert f"![Picture](<{url}/pic.png>)" in structure, structure
+    assert "Inline" in structure and "data:" not in structure, structure
+    assert "> Quoted\n>\n> - point" in structure, structure
+    assert "- item\n\n  ```\n  a\n\n\n  b\n  ```" in structure, structure
+    assert "Plain - dash" in structure and "****" not in structure, structure
     wide = tool("crawl", url=url + "/wide-frontier", limit=100, maxDepth=1)
     assert not wide['errors'] and wide['attempted'] == 100 and wide['truncated'], wide
     assert [page['metadata']['url'] for page in wide['pages'][1:]] == [url + f'/leaf/{i}' for i in range(99)], wide

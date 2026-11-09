@@ -74,30 +74,65 @@
   // A deliberately small DOM-to-Markdown renderer for common article content.
   const escape = s => s.replace(/([\\`*_[\]])/g, '\\$1');
   const base = document.baseURI || location.href;
-  const linkURL = anchor => {
-    const href = anchor.getAttribute('href');
-    // Named anchors are plain text; an empty href is a valid link to the base.
-    if (href === null) return '';
+  // Resolve an href/src; only HTTP(S) targets become Markdown links or images.
+  const resolve = value => {
+    if (value === null) return '';
     try {
-      const url = new URL(href, base);
+      const url = new URL(value, base);
       return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : '';
     } catch { return ''; }
   };
+  // Named anchors are plain text; an empty href is a valid link to the base.
+  const linkURL = anchor => resolve(anchor.getAttribute('href'));
+  const target = url => '(<' + url.replace(/>/g, '%3E') + '>)';
   const ticks = (text, minimum) => {
     let length = minimum;
     for (const run of text.matchAll(/`+/g)) length = Math.max(length, run[0].length + 1);
     return '`'.repeat(length);
   };
-  const blockTags = new Set(['p','div','section','article','main','ul','ol','blockquote','table','tr']);
+  // Text that would read as Markdown structure at the start of a line ("# x",
+  // "- x", "1. x", "> x", "---") gets a sentinel; `compact` turns it into a
+  // backslash only where the text really starts a line and drops it elsewhere.
+  const MARK = '';
+  const structural = /^(?:[#>+-]|\d+[.)])(?:\s|$)|^[-=]{2,}\s*$/;
+  const blockTags = new Set(['p','div','section','article','main','tr']);
+  const indent = (text, width) => text.split('\n').map((line, i) => i && line ? ' '.repeat(width) + line : line).join('\n');
+  const children = n => {
+    let text = '';
+    for (const child of n.childNodes) text += render(child);
+    return text;
+  };
+  const tagOf = n => n.nodeType === 1 ? n.tagName.toLowerCase() : '';
+  const list = (n, ordered) => {
+    const start = parseInt(n.getAttribute('start'), 10);
+    let number = Number.isNaN(start) ? 1 : start, text = '';
+    for (const child of n.childNodes) {
+      if (tagOf(child) !== 'li') { text += render(child); continue; }
+      const marker = ordered ? (number++) + '. ' : '- ';
+      // Continuation lines (nested lists, extra paragraphs) align under the item text.
+      text += '\n' + marker + indent(children(child).trim(), marker.length);
+    }
+    return '\n\n' + text.trim() + '\n\n';
+  };
+  const table = n => {
+    const rows = Array.from(n.querySelectorAll('tr')).filter(row => row.closest('table') === n);
+    if (!rows.length) return '\n\n' + children(n).trim() + '\n\n';
+    const cell = c => children(c).replace(/\s+/g, ' ').trim().replace(/\|/g, '\\|');
+    const grid = rows.map(row => Array.from(row.children).filter(c => ['td', 'th'].includes(tagOf(c))).map(cell));
+    const width = grid.reduce((widest, row) => Math.max(widest, row.length), 1);
+    const line = cells => '| ' + Array.from({length: width}, (_, i) => cells[i] ?? '').join(' | ') + ' |';
+    // GFM needs a header row; the first row serves even when it uses <td>.
+    return '\n\n' + [line(grid[0]), line(Array(width).fill('---')), ...grid.slice(1).map(line)].join('\n') + '\n\n';
+  };
   const render = n => {
-    if (n.nodeType === 3) return escape((n.textContent || '').replace(/\s+/g, ' '));
+    if (n.nodeType === 3) {
+      const text = escape((n.textContent || '').replaceAll(MARK, '').replace(/\s+/g, ' '));
+      const lead = text.length - text.trimStart().length;
+      return structural.test(text.slice(lead)) ? text.slice(0, lead) + MARK + text.slice(lead) : text;
+    }
     if (n.nodeType !== 1) return '';
-    const tag = n.tagName.toLowerCase();
-    const body = () => {
-      let text = '';
-      for (const child of n.childNodes) text += render(child);
-      return text;
-    };
+    const tag = tagOf(n);
+    const body = () => children(n);
     if (tag === 'pre') {
       const text = n.textContent.replace(/\r\n?/g, '\n');
       // Choose a fence longer than any literal backtick run; never alter code to fit it.
@@ -114,11 +149,25 @@
     if (/^h[1-6]$/.test(tag)) return '\n\n' + '#'.repeat(Number(tag[1])) + ' ' + body().trim() + '\n\n';
     if (tag === 'a') {
       const url = linkURL(n);
-      return url ? '[' + body().trim() + '](<' + url.replace(/>/g, '%3E') + '>)' : body();
+      return url ? '[' + body().trim() + ']' + target(url) : body();
     }
-    if (tag === 'strong' || tag === 'b') return '**' + body() + '**';
-    if (tag === 'em' || tag === 'i') return '*' + body() + '*';
-    if (tag === 'li') return '\n- ' + body().trim();
+    if (tag === 'img') {
+      const alt = escape((n.getAttribute('alt') || '').replace(/\s+/g, ' ').trim());
+      const src = resolve(n.getAttribute('src'));
+      // data: and other non-HTTP sources keep only their alt text.
+      return src ? '![' + alt + ']' + target(src) : alt;
+    }
+    if (tag === 'strong' || tag === 'b' || tag === 'em' || tag === 'i') {
+      const text = body();
+      const mark = tag === 'strong' || tag === 'b' ? '**' : '*';
+      return text.trim() ? mark + text + mark : text;
+    }
+    if (tag === 'ul' || tag === 'ol') return list(n, tag === 'ol');
+    if (tag === 'li') return '\n- ' + indent(body().trim(), 2);
+    if (tag === 'table') return table(n);
+    if (tag === 'blockquote') {
+      return '\n\n' + body().trim().split('\n').map(line => line ? '> ' + line : '>').join('\n') + '\n\n';
+    }
     if (tag === 'br') return '\n';
     if (tag === 'hr') return '\n\n---\n\n';
     if (blockTags.has(tag)) return '\n\n' + body().trim() + '\n\n';
@@ -133,15 +182,20 @@
     let fence = 0, blank = false;
     // Compact prose without collapsing meaningful blank lines inside fenced code.
     return markdown.split('\n').filter(line => {
-      const delimiter = line.match(/^(`{3,})$/);
+      // Fences nested in list items or quotes carry their indent/quote prefix.
+      const delimiter = line.match(/^(?:\s*>)*\s*(`{3,})$/);
       if (delimiter && (!fence || delimiter[1].length === fence)) {
         fence = fence ? 0 : delimiter[1].length;
       }
-      if (fence || line.trim()) { blank = false; return true; }
+      // A line holding only quote markers is a blank line inside a blockquote.
+      if (fence || !/^(?:\s*>)*\s*$/.test(line)) { blank = false; return true; }
       if (blank) return false;
       blank = true;
       return true;
-    }).join('\n').trim();
+    }).map(line => line.includes(MARK) ? line
+      // A sentinel after only quote/list markers starts a line: escape it there.
+      .replace(/^((?:\s*>)*\s*(?:(?:[-+]|\d+[.)])\s+)?)\uE000(\d*)/, (_, prefix, digits) => prefix + digits + '\\')
+      .replaceAll(MARK, '') : line).join('\n').trim();
   };
   for (const format of options.formats) {
     if (format === 'markdown') data.markdown = compact(render(content));
