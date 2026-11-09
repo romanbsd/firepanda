@@ -70,6 +70,10 @@ observed. Firecrawl's single `warning` string is replaced by a `warnings` array 
 `{code, message}` records. Links are `{url, title}` records; `map` omits empty
 titles. Markdown renders same-page fragment links (citations, tables of
 contents) as plain text, and `text` drops source indentation outside `<pre>`.
+`html` keeps only meaningful attributes (`href`, `src`, `alt`, `title`,
+table spans, list `start`, `datetime`, and form/accessibility names such as
+`placeholder` and `aria-label`) and drops comments and inline `data:` sources;
+`rawHtml` is returned unmodified.
 
 ## crawl
 

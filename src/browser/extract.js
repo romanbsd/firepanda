@@ -212,10 +212,26 @@
       .replace(/^((?:\s*>)*\s*(?:(?:[-+]|\d+[.)])\s+)?)\uE000(\d*)/, (_, prefix, digits) => prefix + digits + '\\')
       .replaceAll(MARK, '') : line).join('\n').trim();
   };
+  // Cleaned `html` keeps only attributes that carry meaning for a reader;
+  // classes, styles, data-*, ids, srcset, and event handlers are layout
+  // noise. Inline data: sources and comments go too. `rawHtml` is untouched.
+  const meaningful = new Set(['href', 'src', 'alt', 'title', 'colspan', 'rowspan', 'start', 'datetime',
+    // Form controls and accessible names: what a field is for and holds.
+    'aria-label', 'name', 'placeholder', 'type', 'value']);
+  const lean = node => {
+    for (const element of node.querySelectorAll('*')) {
+      for (const {name, value} of Array.from(element.attributes)) {
+        if (!meaningful.has(name) || (name === 'src' && value.startsWith('data:'))) element.removeAttribute(name);
+      }
+    }
+    const comments = [], walker = document.createTreeWalker(node, 128);
+    while (walker.nextNode()) comments.push(walker.currentNode);
+    comments.forEach(comment => comment.remove());
+  };
   for (const format of options.formats) {
     if (format === 'markdown') data.markdown = compact(render(content));
     if (format === 'text') data.text = plainText(content);
-    if (format === 'html') data.html = content.innerHTML;
+    if (format === 'html') { lean(content); data.html = content.innerHTML; }
     if (format === 'rawHtml') data.rawHtml = document.documentElement.outerHTML;
     if (format === 'links') {
       const seen = new Set();

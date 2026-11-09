@@ -149,6 +149,9 @@ try:
     tidy = tool("scrape", url=url + "/markdown-structure", formats=["text"])
     assert "Indented\n\ntext" in tidy["text"] and "  keep\n    indent" in tidy["text"], tidy
     assert "description" not in tidy["metadata"], tidy["metadata"]
+    lean = tool("scrape", url=url + "/markdown-structure", formats=["html", "rawHtml"])
+    assert '<p>Styled <a href="/k">k</a><img alt="dot"></p>' in lean["html"], lean["html"]
+    assert 'class="c"' in lean["rawHtml"] and "<!-- note -->" in lean["rawHtml"], lean["rawHtml"]
     capped = tool("scrape", url=url + "/markdown-structure", formats=["markdown", "text"], maxChars=5)
     assert len(capped["markdown"]) == 5 and len(capped["text"]) == 5, capped
     assert [w["code"] for w in capped["warnings"]] == ["content_truncated"], capped
