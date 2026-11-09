@@ -19,7 +19,6 @@ const VERSIONS: [&str; 5] = [
     "2025-03-26",
     "2024-11-05",
 ];
-const MAX_STRUCTURED_CONTENT_BYTES: usize = 1024 * 1024;
 const MAX_TOOL_RESULT_BYTES: usize = 8 * 1024 * 1024;
 
 fn identity() -> Value {
@@ -106,17 +105,17 @@ impl Server {
             Ok(data) => {
                 let text = serde_json::to_string(&data)
                     .map_err(|error| format!("Cannot serialize tool result: {error}"))?;
-                let text_len = text.len();
-                if text_len > MAX_TOOL_RESULT_BYTES {
+                if text.len() > MAX_TOOL_RESULT_BYTES {
                     return Ok(json!({
                         "content": [{"type": "text", "text": "Tool result exceeds 8 MiB; select fewer output formats or pages"}],
                         "isError": true,
                     }));
                 }
                 // Move the serialized text into the reply: `json!` would copy a
-                // multi-megabyte string. structuredContent repeats the payload
-                // only for normal-size results.
-                let mut result = crate::json::object([
+                // multi-megabyte string. No structuredContent: these tools declare
+                // no outputSchema, and repeating the payload doubles what clients
+                // may feed the model.
+                Ok(crate::json::object([
                     (
                         "content",
                         Value::Array(vec![crate::json::object([
@@ -125,11 +124,7 @@ impl Server {
                         ])]),
                     ),
                     ("isError", Value::Bool(false)),
-                ]);
-                if text_len <= MAX_STRUCTURED_CONTENT_BYTES {
-                    result["structuredContent"] = data;
-                }
-                Ok(result)
+                ]))
             }
             Err(CallError::Invalid(message)) => Err(message),
             Err(CallError::Tool(message)) => Ok(json!({
@@ -342,8 +337,7 @@ mod tests {
 
     #[tokio::test]
     async fn tool_errors_carry_no_structured_content() {
-        // Browser failures become isError results, and only
-        // successful (small) payloads repeat into structuredContent.
+        // Browser failures become isError results without structuredContent.
         let mut server = server();
         let response = server
             .handle(&modern(

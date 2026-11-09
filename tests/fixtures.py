@@ -122,7 +122,9 @@ class Fixture(http.server.BaseHTTPRequestHandler):
                     b'<p><img src="/pic.png" alt="Picture"><img src="data:image/png;base64,AA==" alt="Inline"></p>'
                     b'<blockquote><p>Quoted</p><ul><li>point</li></ul></blockquote>'
                     b'<ul><li>item<pre>a\n\n\nb\n</pre></li></ul>'
-                    b'<p><b></b>Plain - dash</p></main></body></html>')
+                    b'<p><b></b>Plain - dash <a href="#top">Jump</a></p>'
+                    b'<div>\n      Indented\n\n\n\n      text</div><pre>  keep\n    indent</pre>'
+                    b'</main></body></html>')
         elif self.path == "/wide-frontier":
             # Force unordered_set rehash while queue entries still reference its keys.
             body = ('<html><main>' + ''.join(

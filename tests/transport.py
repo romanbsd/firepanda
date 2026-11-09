@@ -205,16 +205,16 @@ class Transport(unittest.TestCase):
                 self.assertTrue(self.receive()["isError"])
                 self.peer.mode = "valid"
                 self.send()
-                self.assertEqual(self.receive()["structuredContent"]["markdown"], "hello")
+                self.assertEqual(json.loads(self.receive()["content"][0]["text"])["markdown"], "hello")
 
     def test_status_is_observed_main_document_only_and_optional(self):
         self.peer.mode = "status"
         self.send()
-        self.assertEqual(self.receive()["structuredContent"]["metadata"]["httpStatus"], 201)
+        self.assertEqual(json.loads(self.receive()["content"][0]["text"])["metadata"]["httpStatus"], 201)
         for mode in ("valid", "no_network", "fractional_status"):
             self.peer.mode = mode
             self.send()
-            self.assertNotIn("httpStatus", self.receive()["structuredContent"]["metadata"])
+            self.assertNotIn("httpStatus", json.loads(self.receive()["content"][0]["text"])["metadata"])
 
     def test_control_frame_and_fragment_deadlines(self):
         for mode in ("pings", "fragments"):

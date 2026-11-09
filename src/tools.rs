@@ -153,7 +153,7 @@ macro_rules! opt {
     };
 }
 
-const OPTIONS: [OptionDef; 10] = [
+const OPTIONS: [OptionDef; 11] = [
     opt!(
         "url",
         OptionKind::Url,
@@ -210,6 +210,15 @@ const OPTIONS: [OptionDef; 10] = [
         fallback = 0,
         minimum = 0,
         maximum = 4096
+    ),
+    opt!(
+        "maxChars",
+        OptionKind::Integer,
+        "Truncate each content format to this many characters; 0 means no limit",
+        tools = SCRAPE | CRAWL,
+        fallback = 0,
+        minimum = 0,
+        maximum = 10_000_000
     ),
     opt!(
         "limit",
@@ -414,6 +423,8 @@ pub fn parse_request(args: &Value, tool: Tool) -> Result<PageRequest, String> {
         wait_for: parse_millis(args, "waitFor")?,
         wait_for_selector: parse_string(args, "waitForSelector")?,
         wait_for_text: parse_string(args, "waitForText")?,
+        max_chars: usize::try_from(parse_integer(args, "maxChars")?)
+            .expect("maxChars bounds are nonnegative"),
     };
     if let Some(value) = args.get("formats") {
         let Some(list) = value.as_array() else {

@@ -103,6 +103,8 @@ pub struct PageRequest {
     pub wait_for: Duration,
     pub wait_for_selector: String,
     pub wait_for_text: String,
+    /// Per-format character cap; 0 means no limit.
+    pub max_chars: usize,
 }
 
 /// Shutdown flag shared by the stdio loop, connect retries, deadline reads,
@@ -642,6 +644,7 @@ mod tests {
                 wait_for: Duration::ZERO,
                 wait_for_selector: String::new(),
                 wait_for_text: String::new(),
+                max_chars: 0,
             })
             .await
             .unwrap_err();
@@ -674,6 +677,7 @@ mod tests {
                 wait_for: Duration::ZERO,
                 wait_for_selector: String::new(),
                 wait_for_text: String::new(),
+                max_chars: 0,
             })
             .await
             .unwrap_err();

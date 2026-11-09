@@ -85,6 +85,10 @@
   // Named anchors are plain text; an empty href is a valid link to the base.
   const linkURL = anchor => resolve(anchor.getAttribute('href'));
   const target = url => '(<' + url.replace(/>/g, '%3E') + '>)';
+  // Jumps within this page (citation markers, tables of contents) read as
+  // plain text: their targets repeat the page URL and cost many tokens.
+  const page = location.href.split('#')[0];
+  const samePage = url => url.includes('#') && url.split('#')[0] === page;
   const ticks = (text, minimum) => {
     let length = minimum;
     for (const run of text.matchAll(/`+/g)) length = Math.max(length, run[0].length + 1);
@@ -149,7 +153,7 @@
     if (/^h[1-6]$/.test(tag)) return '\n\n' + '#'.repeat(Number(tag[1])) + ' ' + body().trim() + '\n\n';
     if (tag === 'a') {
       const url = linkURL(n);
-      return url ? '[' + body().trim() + ']' + target(url) : body();
+      return url && !samePage(url) ? '[' + body().trim() + ']' + target(url) : body();
     }
     if (tag === 'img') {
       const alt = escape((n.getAttribute('alt') || '').replace(/\s+/g, ' ').trim());
@@ -174,10 +178,21 @@
     if (tag === 'td' || tag === 'th') return body() + ' | ';
     return body();
   };
-  const data = {metadata: {
-    title: document.title || '', url: location.href,
-    description: (document.querySelector('meta[name="description"]') || {}).content || ''
-  }};
+  const data = {metadata: {title: document.title || '', url: location.href}};
+  const description = (document.querySelector('meta[name="description"]') || {}).content;
+  if (description) data.metadata.description = description;
+  // Plain text without source indentation or blank-line runs; <pre> blocks
+  // (including plain-text documents) keep their whitespace verbatim.
+  const plainText = node => {
+    const copy = node.cloneNode(true), verbatim = [];
+    copy.querySelectorAll('pre').forEach(pre => {
+      verbatim.push(pre.textContent);
+      pre.textContent = '\uE001' + (verbatim.length - 1) + '\uE001';
+    });
+    return (copy.textContent || '').split('\n').map(line => line.replace(/\s+/g, ' ').trim())
+      .join('\n').replace(/\n{3,}/g, '\n\n')
+      .replace(/\uE001(\d+)\uE001/g, (_, index) => verbatim[index]).trim();
+  };
   const compact = markdown => {
     let fence = 0, blank = false;
     // Compact prose without collapsing meaningful blank lines inside fenced code.
@@ -199,7 +214,7 @@
   };
   for (const format of options.formats) {
     if (format === 'markdown') data.markdown = compact(render(content));
-    if (format === 'text') data.text = (content.textContent || '').trim();
+    if (format === 'text') data.text = plainText(content);
     if (format === 'html') data.html = content.innerHTML;
     if (format === 'rawHtml') data.rawHtml = document.documentElement.outerHTML;
     if (format === 'links') {

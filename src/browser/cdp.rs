@@ -515,22 +515,58 @@ fn validate_extraction(result: &mut Value, request: &PageRequest) -> Result<(), 
     Ok(())
 }
 
+fn push_warning(result: &mut Value, code: &str, message: String) {
+    if result.get("warnings").is_none() {
+        result["warnings"] = json!([]);
+    }
+    if let Some(array) = result.get_mut("warnings").and_then(Value::as_array_mut) {
+        array.push(crate::json::object([
+            ("code", Value::String(code.to_string())),
+            ("message", Value::String(message)),
+        ]));
+    }
+}
+
 fn apply_http_status(result: &mut Value, status: i64) {
     result["metadata"]["httpStatus"] = json!(status);
     // Firecrawl names the same value `statusCode`; emit both so clients can
     // read either without a translation layer.
     result["metadata"]["statusCode"] = json!(status);
-    if status < 400 {
+    if status >= 400 {
+        push_warning(
+            result,
+            "http_error",
+            format!("Document returned HTTP {status}"),
+        );
+    }
+}
+
+/// Cut each content format to `max_chars` characters (0 = no limit) at a
+/// character boundary, and say so in a warning.
+fn truncate_content(result: &mut Value, max_chars: usize) {
+    if max_chars == 0 {
         return;
     }
-    if result.get("warnings").is_none() {
-        result["warnings"] = json!([]);
+    let mut cut = false;
+    for format in [
+        Format::Markdown,
+        Format::Text,
+        Format::Html,
+        Format::RawHtml,
+    ] {
+        if let Some(Value::String(text)) = result.get_mut(format.as_str())
+            && let Some((index, _)) = text.char_indices().nth(max_chars)
+        {
+            text.truncate(index);
+            cut = true;
+        }
     }
-    if let Some(array) = result.get_mut("warnings").and_then(Value::as_array_mut) {
-        array.push(json!({
-            "code": "http_error",
-            "message": format!("Document returned HTTP {status}"),
-        }));
+    if cut {
+        push_warning(
+            result,
+            "content_truncated",
+            format!("Content truncated to {max_chars} characters (maxChars)"),
+        );
     }
 }
 
@@ -549,6 +585,7 @@ pub async fn run_scrape(
     if let Some(status) = connection.http_status {
         apply_http_status(&mut result, status);
     }
+    truncate_content(&mut result, request.max_chars);
     // Fire and forget: the reply would only cost a round trip per page, and
     // the next command on this connection skips it.
     connection
@@ -620,6 +657,7 @@ mod tests {
             wait_for: Duration::ZERO,
             wait_for_selector: String::new(),
             wait_for_text: String::new(),
+            max_chars: 0,
         };
         let mut missing = json!({"metadata": {"url": "https://example.com/"}});
         assert!(validate_extraction(&mut missing, &request).is_err());
@@ -641,5 +679,13 @@ mod tests {
         apply_http_status(&mut good, 503);
         assert_eq!(good["metadata"]["httpStatus"], 503);
         assert_eq!(good["warnings"][0]["code"], "http_error");
+        let mut long = json!({"markdown": "héllo wörld", "text": "ok"});
+        truncate_content(&mut long, 4);
+        assert_eq!(long["markdown"], "héll");
+        assert_eq!(long["text"], "ok");
+        assert_eq!(long["warnings"][0]["code"], "content_truncated");
+        let mut short = json!({"markdown": "hi"});
+        truncate_content(&mut short, 4);
+        assert!(short.get("warnings").is_none());
     }
 }

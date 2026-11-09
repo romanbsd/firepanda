@@ -14,9 +14,9 @@ Every tool in `tools/list` carries:
   `idempotentHint: true`, `openWorldHint: true` — all four tools are idempotent
   network readers with no destructive side effects.
 
-No `outputSchema` is declared. Crawl and map results can exceed the 1 MiB
-`structuredContent` threshold and then omit that field, so a fixed output schema
-would not always validate; `content[0].text` is always the same JSON payload.
+No `outputSchema` is declared and results carry no `structuredContent`:
+`content[0].text` is the JSON payload, sent once so clients that pass every
+content part to the model do not pay for it twice.
 Invalid arguments return JSON-RPC `-32602`; browser/network failures return an
 `isError` tool result with text content only.
 
@@ -49,6 +49,7 @@ Implemented arguments:
 | `waitFor` | `waitFor` | 0–30000 ms, inside the page budget |
 | `waitForSelector` | — | Firepanda addition: wait for CSS-selector presence |
 | `waitForText` | — | Firepanda addition: wait for literal body text |
+| `maxChars` | — | Firepanda addition: per-format character cap with a `content_truncated` warning |
 
 Use `fetch` for a single non-HTML resource of any content type: JSON, Markdown,
 XML, CSV, text, SVG, and images. It bypasses the browser entirely. `scrape` also
@@ -62,16 +63,19 @@ options, and LLM-based cleaning.
 
 Response shape differs: Firepanda returns the payload directly
 (`{markdown, …, metadata, warnings?}`), not Firecrawl's `{success, data}` envelope.
-`metadata` includes `url`, `sourceURL`, `title`, `description`, and
+`metadata` includes `url`, `sourceURL`, `title`, `description` (only when the
+page has one), and
 `httpStatus`/`statusCode` (the Firecrawl name) when the main-document status is
 observed. Firecrawl's single `warning` string is replaced by a `warnings` array of
-`{code, message}` records. Links are `{url, title}` records.
+`{code, message}` records. Links are `{url, title}` records; `map` omits empty
+titles. Markdown renders same-page fragment links (citations, tables of
+contents) as plain text, and `text` drops source indentation outside `<pre>`.
 
 ## crawl
 
 Implemented arguments: `url`, `formats`, `onlyMainContent`, `timeout`, `waitFor`,
-`waitForSelector`, `waitForText`, `limit` (1–100), `maxDepth` (0–5), and
-`maxConcurrency` (1–16).
+`waitForSelector`, `waitForText`, `maxChars`, `limit` (1–100), `maxDepth` (0–5),
+and `maxConcurrency` (1–16).
 
 Firecrawl's crawl is asynchronous: `POST /v2/crawl` returns `{success, id, url}`
 and clients poll a job. Firepanda runs the crawl synchronously inside the tool

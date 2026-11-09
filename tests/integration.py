@@ -144,6 +144,14 @@ try:
     assert "> Quoted\n>\n> - point" in structure, structure
     assert "- item\n\n  ```\n  a\n\n\n  b\n  ```" in structure, structure
     assert "Plain - dash" in structure and "****" not in structure, structure
+    # Same-page jumps are plain text; text output drops source indentation but keeps <pre>.
+    assert "Jump" in structure and "[Jump]" not in structure, structure
+    tidy = tool("scrape", url=url + "/markdown-structure", formats=["text"])
+    assert "Indented\n\ntext" in tidy["text"] and "  keep\n    indent" in tidy["text"], tidy
+    assert "description" not in tidy["metadata"], tidy["metadata"]
+    capped = tool("scrape", url=url + "/markdown-structure", formats=["markdown", "text"], maxChars=5)
+    assert len(capped["markdown"]) == 5 and len(capped["text"]) == 5, capped
+    assert [w["code"] for w in capped["warnings"]] == ["content_truncated"], capped
     wide = tool("crawl", url=url + "/wide-frontier", limit=100, maxDepth=1)
     assert not wide['errors'] and wide['attempted'] == 100 and wide['truncated'], wide
     assert [page['metadata']['url'] for page in wide['pages'][1:]] == [url + f'/leaf/{i}' for i in range(99)], wide

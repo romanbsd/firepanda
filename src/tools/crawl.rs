@@ -128,15 +128,17 @@ impl Crawl {
                         self.truncated = true;
                     } else {
                         self.discovered.insert(candidate.clone());
-                        let title = link
+                        let mut entry =
+                            crate::json::object([("url", Value::String(candidate.to_string()))]);
+                        // Empty titles cost tokens and carry nothing.
+                        if let Some(title) = link
                             .get("title")
                             .and_then(Value::as_str)
-                            .unwrap_or("")
-                            .to_string();
-                        self.links.push(crate::json::object([
-                            ("url", Value::String(candidate.to_string())),
-                            ("title", Value::String(title)),
-                        ]));
+                            .filter(|title| !title.is_empty())
+                        {
+                            entry["title"] = Value::String(title.to_string());
+                        }
+                        self.links.push(entry);
                     }
                 }
                 if expand
@@ -264,6 +266,7 @@ pub async fn run(
                 wait_for: request.wait_for,
                 wait_for_selector: request.wait_for_selector.clone(),
                 wait_for_text: request.wait_for_text.clone(),
+                max_chars: request.max_chars,
             };
             let task = browser.start_page(page_request).await;
             inflight.push_back(Inflight { depth, url, task });
