@@ -267,6 +267,7 @@ pub async fn run(
                 wait_for_selector: request.wait_for_selector.clone(),
                 wait_for_text: request.wait_for_text.clone(),
                 max_chars: request.max_chars,
+                markdown_links: request.markdown_links,
             };
             let task = browser.start_page(page_request).await;
             inflight.push_back(Inflight { depth, url, task });

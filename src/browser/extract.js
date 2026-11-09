@@ -89,6 +89,11 @@
   // plain text: their targets repeat the page URL and cost many tokens.
   const page = location.href.split('#')[0];
   const samePage = url => url.includes('#') && url.split('#')[0] === page;
+  // markdownLinks: "full" keeps absolute targets, "relative" shortens
+  // same-origin ones to their path, "none" keeps only link text / alt text.
+  const pageOrigin = new URL(location.href).origin;
+  const shown = url => options.markdownLinks === 'relative' && url.startsWith(pageOrigin + '/') ?
+    url.slice(pageOrigin.length) : url;
   const ticks = (text, minimum) => {
     let length = minimum;
     for (const run of text.matchAll(/`+/g)) length = Math.max(length, run[0].length + 1);
@@ -153,13 +158,14 @@
     if (/^h[1-6]$/.test(tag)) return '\n\n' + '#'.repeat(Number(tag[1])) + ' ' + body().trim() + '\n\n';
     if (tag === 'a') {
       const url = linkURL(n);
-      return url && !samePage(url) ? '[' + body().trim() + ']' + target(url) : body();
+      if (!url || samePage(url) || options.markdownLinks === 'none') return body();
+      return '[' + body().trim() + ']' + target(shown(url));
     }
     if (tag === 'img') {
       const alt = escape((n.getAttribute('alt') || '').replace(/\s+/g, ' ').trim());
       const src = resolve(n.getAttribute('src'));
       // data: and other non-HTTP sources keep only their alt text.
-      return src ? '![' + alt + ']' + target(src) : alt;
+      return src && options.markdownLinks !== 'none' ? '![' + alt + ']' + target(shown(src)) : alt;
     }
     if (tag === 'strong' || tag === 'b' || tag === 'em' || tag === 'i') {
       const text = body();

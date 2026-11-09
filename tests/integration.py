@@ -149,6 +149,10 @@ try:
     tidy = tool("scrape", url=url + "/markdown-structure", formats=["text"])
     assert "Indented\n\ntext" in tidy["text"] and "  keep\n    indent" in tidy["text"], tidy
     assert "description" not in tidy["metadata"], tidy["metadata"]
+    relative = tool("scrape", url=url + "/markdown-structure", markdownLinks="relative")["markdown"]
+    assert "[k](</k>)" in relative and "![Picture](</pic.png>)" in relative, relative
+    bare = tool("scrape", url=url + "/markdown-structure", markdownLinks="none")["markdown"]
+    assert "Styled k" in bare and "](" not in bare and "Picture" in bare, bare
     lean = tool("scrape", url=url + "/markdown-structure", formats=["html", "rawHtml"])
     assert '<p>Styled <a href="/k">k</a><img alt="dot"></p>' in lean["html"], lean["html"]
     assert 'class="c"' in lean["rawHtml"] and "<!-- note -->" in lean["rawHtml"], lean["rawHtml"]
@@ -164,7 +168,7 @@ try:
     assert "structuredContent" not in budget_result, "large results must not duplicate the payload"
     budget = structured(budget_result)
     assert not budget['errors'] and budget['truncated'] and budget['attempted'] == 2, budget.keys()
-    assert len(budget['pages']) == 1 and len(budget['pages'][0]['text']) > 2 * 1024 * 1024, budget.keys()
+    assert len(budget['pages']) == 1 and len(budget['pages'][0]['text']) > 512 * 1024, budget.keys()
     redirects = tool("crawl", url=url + "/redirect-root", limit=5, maxDepth=1, maxConcurrency=1)
     assert not redirects["errors"], redirects["errors"]
     assert redirects["attempted"] == 2 and len(redirects["pages"]) == 2, redirects

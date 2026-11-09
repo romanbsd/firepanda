@@ -427,6 +427,7 @@ async fn extract(
         "waitForSelector": request.wait_for_selector,
         "waitForText": request.wait_for_text,
         "readyTimeout": remaining,
+        "markdownLinks": request.markdown_links,
     });
     let expression = format!("{EXTRACTION_JS}({extraction})");
     // Move the expression string into the params map: `json!` would clone it,
@@ -658,6 +659,7 @@ mod tests {
             wait_for_selector: String::new(),
             wait_for_text: String::new(),
             max_chars: 0,
+            markdown_links: "full",
         };
         let mut missing = json!({"metadata": {"url": "https://example.com/"}});
         assert!(validate_extraction(&mut missing, &request).is_err());

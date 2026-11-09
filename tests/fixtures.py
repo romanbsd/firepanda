@@ -134,7 +134,7 @@ class Fixture(http.server.BaseHTTPRequestHandler):
         elif self.path.startswith('/leaf/'):
             body = f'<html><main>{self.path}</main></html>'.encode()
         elif self.path in ('/budget-root', '/budget-leaf'):
-            body = ('<html><main>' + 'x' * (2 * 1024 * 1024) +
+            body = ('<html><main>' + 'x' * (600 * 1024) +
                     '<a href="/budget-leaf">Next</a></main></html>').encode()
         elif self.path == "/data.json":
             body = b'{"ok": true, "items": [1, 2, 3], "nested": {"a": "b"}}'

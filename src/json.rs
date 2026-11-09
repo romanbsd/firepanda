@@ -68,7 +68,7 @@ pub fn as_integer(value: &serde_json::Value) -> Option<i128> {
 /// Serialized size of `value` when it fits in `limit` bytes, else `None`.
 /// Counts serializer output directly, so measuring a page never allocates a
 /// page-sized string and stops as soon as the limit is exceeded. Uses the same
-/// compact serializer as the final tool result, so the crawl's 4 MiB budget
+/// compact serializer as the final tool result, so the crawl's 1 MiB budget
 /// matches what the client would receive. Rust's `Value` cannot hold invalid
 /// UTF-8, so the serializer itself cannot fail; a write error only means the
 /// budget was reached.

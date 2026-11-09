@@ -174,6 +174,7 @@ Browser tools (`scrape`, `crawl`, `map`) share:
 | `waitForSelector` | Unset | Nonempty CSS selector, at most 2048 UTF-8 bytes; tests presence, not visibility |
 | `waitForText` | Unset | Nonempty, literal, case-sensitive body text, at most 4096 UTF-8 bytes; excludes scripts/styles/templates |
 | `maxChars` | `0` | Scrape/crawl only: truncate each content format to this many characters (0 = no limit) and add a `content_truncated` warning |
+| `markdownLinks` | `full` | Scrape/crawl only: `full` absolute link/image targets, `relative` same-origin paths, or `none` for link text and alt text only |
 | `limit` | `10` | Crawl/map only: 1–100 navigation attempts |
 | `maxDepth` | `1` | Crawl/map only: 0–5; the starting page has depth 0 |
 | `maxConcurrency` | `4` | Crawl/map only: 1–16 pages fetched at once |
@@ -303,7 +304,7 @@ See [design details](docs/native-design.md) for code structure and protocol beha
 | JSON nesting | 64 levels |
 | WebSocket message | 16 MiB |
 | Serialized tool data | 8 MiB, returned once as JSON text (no duplicate `structuredContent`) |
-| Crawl page data | 4 MiB total |
+| Crawl page data | 1 MiB total |
 | Crawl/map total work | 120 seconds |
 | Crawl/map traversal | 100 attempts, depth 5 maximum |
 | Unique discovery/frontier links | 10000 |

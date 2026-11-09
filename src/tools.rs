@@ -15,7 +15,7 @@ pub const MAX_LINKS: usize = 10000;
 /// Longest accepted URL, before and after normalization.
 const MAX_URL_BYTES: usize = 8192;
 /// Serialization budget for crawl results.
-const MAX_CRAWL_BYTES: usize = 4 * 1024 * 1024;
+const MAX_CRAWL_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
@@ -111,6 +111,8 @@ enum OptionKind {
     Boolean,
     Url,
     Formats,
+    /// One of a fixed set of strings; the first is the default.
+    Choice(&'static [&'static str]),
 }
 
 /// One row per accepted argument. The advertised schema, validation bounds,
@@ -153,7 +155,7 @@ macro_rules! opt {
     };
 }
 
-const OPTIONS: [OptionDef; 11] = [
+const OPTIONS: [OptionDef; 12] = [
     opt!(
         "url",
         OptionKind::Url,
@@ -219,6 +221,12 @@ const OPTIONS: [OptionDef; 11] = [
         fallback = 0,
         minimum = 0,
         maximum = 10_000_000
+    ),
+    opt!(
+        "markdownLinks",
+        OptionKind::Choice(&["full", "relative", "none"]),
+        "Markdown link and image targets: full URLs, same-origin paths, or text only",
+        tools = SCRAPE | CRAWL
     ),
     opt!(
         "limit",
@@ -296,6 +304,19 @@ fn parse_string(args: &Value, name: &str) -> Result<String, String> {
     Ok(text.to_string())
 }
 
+fn parse_choice(args: &Value, name: &str) -> Result<&'static str, String> {
+    let OptionKind::Choice(choices) = known_option(name).kind else {
+        panic!("{name} is not a choice option");
+    };
+    let Some(value) = args.get(name) else {
+        return Ok(choices[0]);
+    };
+    value
+        .as_str()
+        .and_then(|text| choices.iter().find(|choice| **choice == text).copied())
+        .ok_or_else(|| format!("{name} must be one of: {}", choices.join(", ")))
+}
+
 fn parse_boolean(args: &Value, name: &str) -> Result<bool, String> {
     let option = known_option(name);
     let Some(value) = args.get(name) else {
@@ -345,6 +366,12 @@ fn schema_of(option: &OptionDef) -> Value {
             "minItems": 1,
             "items": {"type": "string", "enum": Format::ALL},
             "default": ["markdown"],
+            "description": option.description,
+        }),
+        OptionKind::Choice(choices) => json!({
+            "type": "string",
+            "enum": choices,
+            "default": choices[0],
             "description": option.description,
         }),
     }
@@ -425,6 +452,7 @@ pub fn parse_request(args: &Value, tool: Tool) -> Result<PageRequest, String> {
         wait_for_text: parse_string(args, "waitForText")?,
         max_chars: usize::try_from(parse_integer(args, "maxChars")?)
             .expect("maxChars bounds are nonnegative"),
+        markdown_links: parse_choice(args, "markdownLinks")?,
     };
     if let Some(value) = args.get("formats") {
         let Some(list) = value.as_array() else {
@@ -613,6 +641,19 @@ mod tests {
                 tool
             )
             .is_err()
+        );
+        assert!(
+            parse_request(
+                &json!({"url": "https://example.com", "markdownLinks": "short"}),
+                tool
+            )
+            .is_err()
+        );
+        assert_eq!(
+            parse_request(&json!({"url": "https://example.com"}), tool)
+                .unwrap()
+                .markdown_links,
+            "full"
         );
         assert!(
             parse_request(

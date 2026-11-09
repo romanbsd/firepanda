@@ -51,7 +51,7 @@ Crawl/map dispatch fills a `maxConcurrency` window in frontier order and consume
 results oldest-first. Fetches overlap, but pages, links, and errors keep sequential
 breadth-first order. Bounds match the previous implementation: 120-second crawl
 budget, 100 ms dispatch floor, `limit`/`maxDepth` caps, a 10000-link frontier, and
-a 4 MiB serialization budget that drops later pages without discarding siblings.
+a 1 MiB serialization budget that drops later pages without discarding siblings.
 
 Idle expiry counts from completed browser work (`page_completed`), not from
 dispatch. Tool discovery, pings, and notifications do not renew it. The idle
@@ -84,7 +84,7 @@ definitions feed both validation and JSON schemas, including per-tool applicabil
   sets, and map discovery. Map output owns one `String` per returned link.
 - `fetch` frees the raw body after base64 encoding; UTF-8 text moves into the
   response string without a copy.
-- Crawl's 4 MiB page budget is measured with a counting writer, so a page is never
+- Crawl's 1 MiB page budget is measured with a counting writer, so a page is never
   serialized into a page-sized temporary string just to size it.
 - Remaining ceiling: a reply above 1 MiB still holds the tool payload while the
   text field is serialized, then the serialized text while the envelope is built.

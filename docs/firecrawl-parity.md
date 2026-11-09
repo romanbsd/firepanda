@@ -50,6 +50,7 @@ Implemented arguments:
 | `waitForSelector` | — | Firepanda addition: wait for CSS-selector presence |
 | `waitForText` | — | Firepanda addition: wait for literal body text |
 | `maxChars` | — | Firepanda addition: per-format character cap with a `content_truncated` warning |
+| `markdownLinks` | — | Firepanda addition: `full`, `relative` (same-origin paths), or `none` (text only) |
 
 Use `fetch` for a single non-HTML resource of any content type: JSON, Markdown,
 XML, CSV, text, SVG, and images. It bypasses the browser entirely. `scrape` also
@@ -78,13 +79,13 @@ table spans, list `start`, `datetime`, and form/accessibility names such as
 ## crawl
 
 Implemented arguments: `url`, `formats`, `onlyMainContent`, `timeout`, `waitFor`,
-`waitForSelector`, `waitForText`, `maxChars`, `limit` (1–100), `maxDepth` (0–5),
+`waitForSelector`, `waitForText`, `maxChars`, `markdownLinks`, `limit` (1–100), `maxDepth` (0–5),
 and `maxConcurrency` (1–16).
 
 Firecrawl's crawl is asynchronous: `POST /v2/crawl` returns `{success, id, url}`
 and clients poll a job. Firepanda runs the crawl synchronously inside the tool
 call and returns all pages at once. It is breadth-first, same-origin, and bounded
-by 120 seconds and a 4 MiB page budget. `maxDepth` is Firepanda's name for
+by 120 seconds and a 1 MiB page budget. `maxDepth` is Firepanda's name for
 Firecrawl's `maxDiscoveryDepth`. Not implemented: `includePaths`/`excludePaths`,
 `sitemap` modes, `delay`, `allowSubdomains`, `allowExternalLinks`, webhooks, and
 the async status endpoint.
