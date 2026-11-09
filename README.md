@@ -170,7 +170,7 @@ Browser tools (`scrape`, `crawl`, `map`) share:
 | `formats` | `["markdown"]` | Any of `markdown`, `text`, `html`, `rawHtml`, `links`; map always extracts links |
 | `onlyMainContent` | `true` | Remove common page chrome and prefer main/article content; applies to projected content, not raw HTML or discovery links |
 | `timeout` | `30000` | Per-page budget, 100–120000 ms, including navigation, waits, and extraction |
-| `waitFor` | `0` | Extra post-load wait, 0–30000 ms, inside the page budget |
+| `waitFor` | `0` | Extra post-load wait, 0–30000 ms, shortened to the time left in the page budget |
 | `waitForSelector` | Unset | Nonempty CSS selector, at most 2048 UTF-8 bytes; tests presence, not visibility |
 | `waitForText` | Unset | Nonempty, literal, case-sensitive body text, at most 4096 UTF-8 bytes; excludes scripts/styles/templates |
 | `maxChars` | `0` | Scrape/crawl only: truncate each content format to this many characters (0 = no limit) and add a `content_truncated` warning |

@@ -183,7 +183,13 @@
     if (tag === 'strong' || tag === 'b' || tag === 'em' || tag === 'i') {
       const text = body();
       const mark = tag === 'strong' || tag === 'b' ? '**' : '*';
-      return text.trim() ? mark + text + mark : text;
+      const trimmed = text.trim();
+      if (!trimmed) return text;
+      // CommonMark emphasis cannot start or end with whitespace inside the
+      // markers, so the surrounding spaces stay outside them.
+      const lead = text.length - text.trimStart().length;
+      const trail = text.length - text.trimEnd().length;
+      return text.slice(0, lead) + mark + trimmed + mark + text.slice(text.length - trail);
     }
     if (tag === 'ul' || tag === 'ol') return list(n, tag === 'ol');
     if (tag === 'li') return '\n- ' + indent(body().trim(), 2);
@@ -197,7 +203,7 @@
     if (tag === 'td' || tag === 'th') return body() + ' | ';
     return body();
   };
-  const data = {metadata: {title: document.title || '', url: location.href}};
+  const data = {metadata: {title: document.title || '', url: page}};
   const description = (document.querySelector('meta[name="description"]') || {}).content;
   if (description) data.metadata.description = description;
   // Plain text without source indentation or blank-line runs; <pre> blocks

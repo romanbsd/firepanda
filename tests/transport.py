@@ -121,12 +121,20 @@ class Peer:
                                 connection.sendall(frame(b"", opcode=9 if self.mode == "pings" else 0, final=self.mode == "pings"))
                                 time.sleep(0.02)
                             continue
+                        # The navigate reply commits the main frame. Status and
+                        # load events follow it; a load sent before the reply
+                        # is an about:blank event and is ignored.
+                        reply["result"] = {"frameId": "main"}
+                        connection.sendall(frame(reply))
                         if self.mode in ("status", "fractional_status"):
-                            reply["result"] = {"frameId": "main"}
                             for frame_id, status in (("main", 201 if self.mode == "status" else 201.5), ("child", 503)):
                                 connection.sendall(frame({"method": "Network.responseReceived", "sessionId": "session", "params": {
                                     "type": "Document", "frameId": frame_id, "response": {"status": status}}}))
                         connection.sendall(frame({"method": "Page.loadEventFired", "sessionId": "session"}))
+                        continue
+                    elif method == "Target.disposeBrowserContext" and self.mode == "dispose_error":
+                        reply.pop("result")
+                        reply["error"] = {"code": -32000, "message": "dispose failed"}
                     elif method == "Runtime.evaluate":
                         if self.mode == "missing_result":
                             reply.pop("result")
@@ -226,6 +234,13 @@ class Transport(unittest.TestCase):
                 self.assertTrue(self.peer.entered.wait(2))
                 self.assertTrue(self.receive()["isError"])
                 self.assertLess(time.monotonic() - start, 2)
+
+    def test_dispose_failure_still_returns_the_page(self):
+        self.peer.mode = "dispose_error"
+        self.send()
+        body = self.receive()
+        self.assertFalse(body.get("isError"), body)
+        self.assertEqual(json.loads(body["content"][0]["text"])["markdown"], "hello")
 
     def test_sigterm_during_fragment_stream(self):
         self.peer.mode = "fragments"

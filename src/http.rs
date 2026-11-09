@@ -6,6 +6,8 @@
 //! and falls back to HTTP/1.1; cleartext requests use HTTP/1.1. One process-wide
 //! client keeps pooled connections (90 s idle), `TCP_NODELAY`, and compression
 //! support, so repeated fetches reuse connections instead of reconnecting.
+//! Referer is off. Redirects stop at 10 hops and refuse a hop `normalize_parsed`
+//! would reject, before that hop is sent.
 
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -22,11 +24,23 @@ pub fn client() -> Result<&'static primp::Client, String> {
             primp::Client::builder()
                 .impersonate(primp::Impersonate::ChromeV146)
                 .timeout(CLIENT_TIMEOUT)
+                .referer(false)
+                .redirect(primp::redirect::Policy::custom(safe_redirect))
                 .build()
                 .map_err(|error| format!("HTTP client failed: {}", error.without_url()))
         })
         .as_ref()
         .map_err(Clone::clone)
+}
+
+/// Follow a redirect only when the next hop is a URL Firepanda would accept,
+/// and stop after the default 10 hops. A custom policy has to enforce the
+/// loop itself.
+fn safe_redirect(attempt: primp::redirect::Attempt<'_>) -> primp::redirect::Action {
+    if let Err(message) = crate::tools::normalize_parsed(attempt.url().clone()) {
+        return attempt.error(message);
+    }
+    primp::redirect::Policy::limited(10).redirect(attempt)
 }
 
 /// Read a body up to `max_bytes`, failing as soon as the deadline expires.

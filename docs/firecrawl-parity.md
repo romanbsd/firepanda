@@ -46,7 +46,7 @@ Implemented arguments:
 | `formats` | `formats` | strings only; `markdown`, `text`, `html`, `rawHtml`, `links` |
 | `onlyMainContent` | `onlyMainContent` | deterministic HTML-level main-content filter |
 | `timeout` | `timeout` | 100–120000 ms (Firepanda bound) |
-| `waitFor` | `waitFor` | 0–30000 ms, inside the page budget |
+| `waitFor` | `waitFor` | 0–30000 ms, shortened to the time left in the page budget |
 | `waitForSelector` | — | Firepanda addition: wait for CSS-selector presence |
 | `waitForText` | — | Firepanda addition: wait for literal body text |
 | `maxChars` | — | Firepanda addition: per-format character cap with a `content_truncated` warning |

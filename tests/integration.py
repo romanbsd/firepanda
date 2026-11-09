@@ -151,6 +151,10 @@ try:
     assert "description" not in tidy["metadata"], tidy["metadata"]
     assert "noalt.png" not in structure and "/icon" not in structure, structure
     assert f"[Tracked](<{url}/t?id=1&q=a%20b>)" in structure, structure
+    assert "**hello**" in structure and "** hello **" not in structure, structure
+    tracked_page = tool(
+        "scrape", url=url + "/markdown-structure?utm_source=news&fbclid=abc#section")
+    assert tracked_page["metadata"]["url"] == url + "/markdown-structure", tracked_page["metadata"]
     relative = tool("scrape", url=url + "/markdown-structure", markdownLinks="relative")["markdown"]
     assert "[k](</k>)" in relative and "![Picture](</pic.png>)" in relative, relative
     bare = tool("scrape", url=url + "/markdown-structure", markdownLinks="none")["markdown"]
@@ -176,9 +180,9 @@ try:
     assert redirects["attempted"] == 2 and len(redirects["pages"]) == 2, redirects
     redirect_cap = tool("crawl", url=url + "/redirect-root", limit=2, maxDepth=1, maxConcurrency=1)
     assert not redirect_cap["truncated"] and len(redirect_cap["pages"]) == 2, redirect_cap
-    # A failed page reaps the browser only after its in-flight siblings drain;
-    # their results survive and the crawl resumes on a fresh child, still in
-    # breadth-first order.
+    # A document that is not HTTP fails that page only. In-flight siblings are
+    # kept, breadth-first order holds, and the browser stays up. A dead CDP
+    # connection is what relaunches the child.
     child_before_flaky = child()[0]
     flaky = tool("crawl", url=url + "/flaky-root", limit=10, maxDepth=1, timeout=8000,
                  maxConcurrency=2)
@@ -187,7 +191,7 @@ try:
         url + "/flaky-root", url + "/p/slow-a", url + "/p/slow-b"], flaky
     assert flaky["attempted"] == 4, flaky
     resumed_child = child()[0]
-    assert resumed_child != child_before_flaky, "A failed page must relaunch the child"
+    assert resumed_child == child_before_flaky, "A broken document must not relaunch the browser"
     # Overlapping fetches keep BFS order and beat the sequential wall time.
     sequential_start = time.monotonic()
     sequential = tool("crawl", url=url + "/parallel-root", limit=10, maxDepth=1, timeout=5000,
@@ -223,12 +227,12 @@ try:
     assert child()[0] == first_child, "Browser must be reused between calls"
     failure = rpc("tools/call", name="scrape", arguments={"url": url + "/slow", "timeout": 100})
     assert failure["isError"], failure
-    assert not children(), "Failed scrape must reap its owned browser"
-    assert not os.path.exists(os.path.dirname(socket_path)), "Failed scrape left its socket directory"
+    assert children() == [first_child], "A page timeout must leave the browser up"
+    assert os.path.exists(os.path.dirname(socket_path)), "A page timeout must keep the socket"
     recovered = tool("scrape", url=url)
     assert "Rendered by JavaScript" in recovered["markdown"]
     final_child, socket_path = child()
-    assert final_child != first_child, "Timeout must replace the interrupted child"
+    assert final_child == first_child, "A page timeout must reuse the browser"
     print("PASS: native UDS WebSocket, JS, formats, crawl/map, timeout recovery, reuse, private permissions")
 finally:
     service.process.stdin.close()

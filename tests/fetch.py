@@ -44,6 +44,7 @@ class Resources(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         self.server.ports.append(self.client_address[1])
+        self.server.hits.append((self.path, self.headers.get("Referer")))
         if self.path == "/data.json":
             self.reply(200, b'{"ok": true, "items": [1, 2, 3]}', "application/json")
         elif self.path == "/doc.md":
@@ -67,6 +68,12 @@ class Resources(http.server.BaseHTTPRequestHandler):
             self.send_header("Location", "/data.json")
             self.send_header("Content-Length", "0")
             self.end_headers()
+        elif self.path == "/redirect-creds":
+            port = self.server.server_address[1]
+            self.send_response(302)
+            self.send_header("Location", f"http://user:pass@127.0.0.1:{port}/data.json")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
         elif self.path == "/missing":
             self.reply(404, b'{"error": "not found"}', "application/json")
         elif self.path == "/slow":
@@ -80,6 +87,7 @@ class Resources(http.server.BaseHTTPRequestHandler):
 
 server = QuietServer(("127.0.0.1", 0), Resources)
 server.ports = []
+server.hits = []
 threading.Thread(target=server.serve_forever, daemon=True).start()
 base = "http://127.0.0.1:" + str(server.server_port)
 service = Service([binary, "--lightpanda", lightpanda])
@@ -132,6 +140,12 @@ try:
     assert redirected["url"] == base + "/data.json", redirected
     assert redirected["sourceURL"] == base + "/redirect-json", redirected
     assert redirected["text"] == '{"ok": true, "items": [1, 2, 3]}', redirected
+    data_hits = [hit for hit in server.hits if hit[0] == "/data.json"]
+    assert data_hits and all(referer is None for _, referer in data_hits), server.hits
+
+    creds = fetch("/redirect-creds")
+    assert creds.get("isError") and "credential" in creds["content"][0]["text"].lower(), creds
+    assert sum(1 for path, _ in server.hits if path == "/data.json") == len(data_hits)
 
     missing = structured(fetch("/missing"))
     assert missing["statusCode"] == 404 and "not found" in missing["text"], missing

@@ -1,12 +1,12 @@
 //! BFS crawl/map with bounded concurrency. The dispatch loop fills the window
 //! in frontier order and consumes results oldest-first, so pages, links, and
 //! errors keep sequential breadth-first order even though fetches overlap. A
-//! failed page drains its
-//! siblings (keeping their results) before the browser is reaped and
-//! relaunched.
+//! page whose CDP connection is unusable drains its siblings (keeping their
+//! results) before the browser is reaped and relaunched. Readiness, validation,
+//! and wait errors stay on that page.
 
 use super::{MAX_CRAWL_BYTES, MAX_LINKS, Tool, normalize_url, origin};
-use crate::browser::{Browser, Format, PageRequest, PageTask};
+use crate::browser::{Browser, Format, PageError, PageRequest, PageTask};
 use crate::json::serialized_size_within;
 use serde_json::Value;
 use std::collections::{HashSet, VecDeque};
@@ -94,7 +94,10 @@ impl Crawl {
         // A redirect may reach a URL already queued through a direct link.
         // Track final destinations so it is neither rendered nor returned twice.
         if !self.visited.insert(canonical.clone()) {
-            return Ok(());
+            // The redirect target was already fetched. Count it as an error so
+            // attempted stays equal to pages plus errors, and do not fetch it
+            // again.
+            return Err("Redirected to an already visited URL".to_string());
         }
         // Redirected pages are returned, but external destinations never expand.
         let expand = origin(&canonical) == self.start_origin;
@@ -124,22 +127,11 @@ impl Crawl {
                 // Crawl only needs its frontier; retaining a second map of
                 // every link would waste memory.
                 if self.tool == Tool::Map && !self.discovered.contains(candidate.as_ref()) {
-                    if self.discovered.len() == MAX_LINKS {
-                        self.truncated = true;
-                    } else {
-                        self.discovered.insert(candidate.clone());
-                        let mut entry =
-                            crate::json::object([("url", Value::String(candidate.to_string()))]);
-                        // Empty titles cost tokens and carry nothing.
-                        if let Some(title) = link
-                            .get("title")
-                            .and_then(Value::as_str)
-                            .filter(|title| !title.is_empty())
-                        {
-                            entry["title"] = Value::String(title.to_string());
-                        }
-                        self.links.push(entry);
-                    }
+                    let title = link
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .filter(|title| !title.is_empty());
+                    self.store_map_link(&candidate, title);
                 }
                 if expand
                     && depth < self.max_depth
@@ -175,6 +167,33 @@ impl Crawl {
         Ok(())
     }
 
+    /// Keep a map link when it fits the shared 1 MiB result budget and the
+    /// count cap. A link that does not fit is omitted and not marked
+    /// discovered, so a later smaller link can still be stored.
+    fn store_map_link(&mut self, candidate: &Arc<str>, title: Option<&str>) {
+        if self.discovered.len() == MAX_LINKS {
+            self.truncated = true;
+            return;
+        }
+        let mut entry = crate::json::object([("url", Value::String(candidate.to_string()))]);
+        if let Some(title) = title {
+            entry["title"] = Value::String(title.to_string());
+        }
+        let Some(entry_len) = serialized_size_within(&entry, MAX_CRAWL_BYTES) else {
+            self.truncated = true;
+            return;
+        };
+        // `[` + entries joined by `,` + `]`.
+        let framing = if self.links.is_empty() { 2 } else { 1 };
+        if self.bytes + entry_len + framing > MAX_CRAWL_BYTES {
+            self.truncated = true;
+            return;
+        }
+        self.bytes += entry_len + framing;
+        self.discovered.insert(candidate.clone());
+        self.links.push(entry);
+    }
+
     /// Fold a resolved page (or its error) into the result arrays.
     fn finish(&mut self, depth: i64, url: &str, outcome: Result<Value, String>) {
         match outcome {
@@ -198,14 +217,30 @@ fn error_record(url: &str, message: String) -> Value {
 }
 
 /// Await one in-flight page and normalize worker failures.
-async fn resolve(task: PageTask) -> Result<Value, String> {
+async fn resolve(task: PageTask) -> Result<Value, PageError> {
     match task {
-        PageTask::Failed(message) => Err(message),
+        PageTask::Failed(message) => Err(PageError {
+            message,
+            reap: true,
+        }),
         PageTask::Running(handle) => match handle.await {
             Ok(result) => result,
-            Err(join_error) => Err(format!("Page worker failed: {join_error}")),
+            Err(join_error) => Err(PageError {
+                message: format!("Page worker failed: {join_error}"),
+                reap: true,
+            }),
         },
     }
+}
+
+/// Per-page timeout and wait, both capped by the time still in the crawl.
+fn clamped_wait(
+    wait_for: Duration,
+    page_timeout: Duration,
+    remaining: Duration,
+) -> (Duration, Duration) {
+    let timeout = page_timeout.min(remaining);
+    (timeout, wait_for.min(timeout))
 }
 
 /// Run one crawl/map tool call to completion (the discovery path).
@@ -258,12 +293,13 @@ pub async fn run(
             }
             // Build the per-page request directly: cloning the template and
             // then overwriting url/formats/timeout would copy them twice.
+            let (timeout, wait_for) = clamped_wait(request.wait_for, page_timeout, remaining);
             let page_request = PageRequest {
                 url: url.to_string(),
                 formats,
                 only_main_content: request.only_main_content,
-                timeout: std::cmp::min(page_timeout, remaining),
-                wait_for: request.wait_for,
+                timeout,
+                wait_for,
                 wait_for_selector: request.wait_for_selector.clone(),
                 wait_for_text: request.wait_for_text.clone(),
                 max_chars: request.max_chars,
@@ -276,18 +312,23 @@ pub async fn run(
             break; // Nothing in flight and nothing dispatchable.
         };
         let outcome = resolve(item.task).await;
+        let reap = matches!(&outcome, Err(error) if error.reap);
+        let outcome = outcome.map_err(|error| error.message);
         if outcome.is_ok() {
             browser.page_completed().await; // Idle counts from the fetch.
         }
-        let failed = outcome.is_err();
         crawl.finish(item.depth, &item.url, outcome);
-        if failed {
-            // A failed fetch invalidates its connection: pause dispatch,
-            // drain the siblings while keeping their results, then reap
-            // and relaunch the browser before anything else is fetched.
+        if reap {
+            // The connection is unusable: pause dispatch, drain the siblings
+            // while keeping their results, then reap and relaunch before
+            // anything else is fetched.
             while let Some(sibling) = inflight.pop_front() {
                 let outcome = resolve(sibling.task).await;
-                crawl.finish(sibling.depth, &sibling.url, outcome);
+                crawl.finish(
+                    sibling.depth,
+                    &sibling.url,
+                    outcome.map_err(|error| error.message),
+                );
             }
             // restart(): reap the browser and every pooled connection; the
             // next dispatch cold-starts a new child.
@@ -321,4 +362,99 @@ pub async fn run(
         result["pages"] = Value::Array(crawl.pages);
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Crawl, MAX_CRAWL_BYTES, Tool};
+    use serde_json::{Value, json};
+    use std::time::Duration;
+
+    fn page(url: &str, links: &Value) -> Value {
+        json!({
+            "metadata": {"url": url},
+            "markdown": "body",
+            "links": links,
+        })
+    }
+
+    #[test]
+    fn redirect_duplicate_is_an_error_and_is_not_stored_again() {
+        let mut crawl = Crawl::new(Tool::Crawl, "https://example.com/start", 1, false);
+        let first = page("https://example.com/a", &json!([]));
+        crawl.record(0, first.clone()).expect("first visit");
+        let error = crawl
+            .record(0, first)
+            .expect_err("a redirect to a visited URL");
+        assert!(error.contains("already visited"), "{error}");
+        assert_eq!(crawl.pages.len(), 1);
+        crawl.attempted = 2;
+        crawl.finish(
+            1,
+            "https://example.com/b",
+            Ok(page("https://example.com/a", &json!([]))),
+        );
+        assert_eq!(crawl.pages.len(), 1);
+        assert_eq!(crawl.errors.len(), 1);
+        assert!(
+            crawl.errors[0]["error"]
+                .as_str()
+                .unwrap()
+                .contains("already visited")
+        );
+        assert_eq!(
+            crawl.attempted,
+            i64::try_from(crawl.pages.len() + crawl.errors.len()).unwrap()
+        );
+        assert!(crawl.queue.is_empty());
+    }
+
+    #[test]
+    fn map_links_share_the_crawl_byte_budget() {
+        let mut crawl = Crawl::new(Tool::Map, "https://example.com/start", 1, true);
+        crawl
+            .record(
+                0,
+                page(
+                    "https://example.com/start",
+                    &json!([
+                        {"url": "https://example.com/huge", "title": "t".repeat(MAX_CRAWL_BYTES + 1)},
+                        {"url": "https://example.com/small", "title": "ok"},
+                    ]),
+                ),
+            )
+            .expect("map page");
+        assert!(crawl.truncated);
+        assert_eq!(crawl.links.len(), 1);
+        assert_eq!(crawl.links[0]["url"], "https://example.com/small");
+        assert!(!crawl.discovered.iter().any(|url| url.contains("/huge")));
+
+        let links: Vec<Value> = (0..5000)
+            .map(|i| {
+                json!({
+                    "url": format!("https://example.com/p/{i:0>180}"),
+                    "title": format!("title-{i}"),
+                })
+            })
+            .collect();
+        let mut crawl = Crawl::new(Tool::Map, "https://example.com/start", 0, true);
+        crawl
+            .record(0, page("https://example.com/start", &Value::Array(links)))
+            .expect("bulk map page");
+        assert!(crawl.truncated);
+        assert!(crawl.links.len() < 5000, "{}", crawl.links.len());
+        let encoded = serde_json::to_string(&crawl.links).expect("links json");
+        assert!(encoded.len() <= MAX_CRAWL_BYTES, "{}", encoded.len());
+    }
+
+    #[test]
+    fn crawl_wait_uses_the_tighter_page_budget() {
+        let (timeout, wait) = super::clamped_wait(
+            Duration::from_secs(30),
+            Duration::from_secs(10),
+            Duration::from_secs(4),
+        );
+        assert_eq!(timeout, Duration::from_secs(4));
+        assert_eq!(wait, Duration::from_secs(4));
+    }
 }

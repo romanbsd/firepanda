@@ -4,7 +4,7 @@
 
 mod cdp;
 
-use cdp::{Connection, ScrapeError};
+use cdp::Connection;
 use serde::Serialize;
 use serde_json::Value;
 use std::os::fd::AsFd;
@@ -157,11 +157,18 @@ pub struct Browser {
     inner: Arc<Inner>,
 }
 
+/// Page failure that still says whether the browser process is reusable.
+#[derive(Debug)]
+pub struct PageError {
+    pub message: String,
+    pub reap: bool,
+}
+
 /// In-flight crawl page. `Failed` means the dispatch-thread checkout failed
 /// and no worker ran; `Running` owns a pooled connection until it resolves.
 pub enum PageTask {
     Failed(String),
-    Running(tokio::task::JoinHandle<Result<Value, String>>),
+    Running(tokio::task::JoinHandle<Result<Value, PageError>>),
 }
 
 impl Browser {
@@ -182,19 +189,23 @@ impl Browser {
         }
     }
 
-    /// One page fetch. Errors release owned resources (the connection is
-    /// dropped by `fetch`, the pool and child by `shutdown`); external sockets
-    /// survive so the next scrape reconnects fresh.
+    /// One page fetch. A dead CDP connection reaps the pool and the owned
+    /// child. A page error (readiness, validation, a rejected command) drops
+    /// that connection and leaves the browser up.
     pub async fn scrape(&self, request: &PageRequest) -> Result<Value, String> {
         let (deadline, connect_deadline) = self.begin(request.timeout).await;
-        let outcome = self.fetch(request, deadline, connect_deadline).await;
-        if outcome.is_err() {
-            // disposeOnDetach releases this operation's context even if its
-            // CDP stream is unusable; sending another command on a failed
-            // stream can hang cleanup.
-            self.shutdown().await;
+        match self.fetch(request, deadline, connect_deadline).await {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                if error.reap {
+                    // disposeOnDetach releases this operation's context even if
+                    // its CDP stream is unusable; sending another command on a
+                    // failed stream can hang cleanup.
+                    self.shutdown().await;
+                }
+                Err(error.message)
+            }
         }
-        outcome
     }
 
     /// Clear idle bookkeeping and derive the page and connect deadlines.
@@ -210,13 +221,25 @@ impl Browser {
         request: &PageRequest,
         deadline: Instant,
         connect_deadline: Instant,
-    ) -> Result<Value, String> {
-        let mut connection = self.checkout(connect_deadline).await?;
-        let result = cdp::run_scrape(&mut connection, request, deadline)
-            .await
-            .map_err(ScrapeError::message)?;
-        // Only healthy connections return to the pool; an error destroys this
-        // one and `shutdown` reaps everything after it returns.
+    ) -> Result<Value, PageError> {
+        let mut connection =
+            self.checkout(connect_deadline)
+                .await
+                .map_err(|message| PageError {
+                    message,
+                    reap: true,
+                })?;
+        let result = match cdp::run_scrape(&mut connection, request, deadline).await {
+            Ok(result) => result,
+            Err(error) => {
+                return Err(PageError {
+                    reap: error.reaps_browser(),
+                    message: error.message(),
+                });
+            }
+        };
+        // A dispose failure has already dropped the socket. Pooling that
+        // connection makes the next checkout reconnect instead of reusing it.
         self.inner.free.lock().await.push(connection);
         // Inactivity starts after work completes, not when it starts.
         self.inner.process.lock().await.idle_since = Some(Instant::now());
@@ -236,11 +259,15 @@ impl Browser {
         let inner = Arc::clone(&self.inner);
         PageTask::Running(tokio::spawn(async move {
             let mut connection = connection;
-            let result = cdp::run_scrape(&mut connection, &request, deadline)
-                .await
-                .map_err(ScrapeError::message);
-            // Only healthy connections return to the pool; an error destroys
-            // this one and the crawl loop reaps the browser after draining.
+            let result = match cdp::run_scrape(&mut connection, &request, deadline).await {
+                Ok(result) => Ok(result),
+                Err(error) => Err(PageError {
+                    reap: error.reaps_browser(),
+                    message: error.message(),
+                }),
+            };
+            // Only a finished page returns its connection. An error drops this
+            // socket; the crawl loop reaps the browser only when `reap` is set.
             if result.is_ok() {
                 inner.free.lock().await.push(connection);
             }

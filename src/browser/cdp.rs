@@ -36,6 +36,26 @@ impl ScrapeError {
         }
     }
 
+    /// The browser process is reusable after a page error unless this socket
+    /// can no longer speak CDP. Readiness, validation, and ordinary rejections
+    /// drop the connection only.
+    pub fn reaps_browser(&self) -> bool {
+        let Self::Fatal(message) = self else {
+            return false;
+        };
+        message == DISCONNECTED
+            || [
+                "Cannot write Lightpanda CDP command",
+                "Lightpanda exited",
+                "Malformed CDP",
+                "Invalid CDP JSON",
+                "CDP response",
+                "CDP result",
+            ]
+            .iter()
+            .any(|prefix| message.starts_with(prefix))
+    }
+
     fn fatal(message: impl Into<String>) -> Self {
         Self::Fatal(message.into())
     }
@@ -138,8 +158,21 @@ impl Connection {
     fn observe(&mut self, message: &Value) {
         let method = string_member(message, "method");
         let session_id = string_member(message, "sessionId");
-        if method == "Page.loadEventFired" && session_id == self.active_session {
-            self.page_loaded = true;
+        // `Page.loadEventFired` has no frame id. Ignore it until navigate has
+        // stored `main_frame`, so an about:blank load during `Page.enable`
+        // cannot finish the wait. A child frame's `loadEventFired` still has
+        // no id and can satisfy the wait after that. `Page.lifecycleEvent`
+        // `"load"` is accepted only for the main frame.
+        if session_id == self.active_session && !self.main_frame.is_empty() {
+            if method == "Page.loadEventFired" {
+                self.page_loaded = true;
+            } else if method == "Page.lifecycleEvent"
+                && let Some(params) = message.get("params")
+                && string_member(params, "name") == "load"
+                && string_member(params, "frameId") == self.main_frame
+            {
+                self.page_loaded = true;
+            }
         }
         if method != "Network.responseReceived" || session_id != self.active_session {
             return;
@@ -379,18 +412,21 @@ async fn navigate(
 }
 
 /// Sleep in short slices so SIGTERM still tears down the owned child promptly.
+/// `waitFor` is shortened to the time still inside this page's deadline.
 async fn wait_after_load(
     request: &PageRequest,
     deadline: Instant,
     stop: &Stop,
 ) -> Result<(), ScrapeError> {
     let now = Instant::now();
-    if now + request.wait_for >= deadline {
-        return Err(ScrapeError::fatal(
-            "waitFor exceeds remaining operation timeout",
-        ));
+    let usable = deadline
+        .saturating_duration_since(now)
+        .saturating_sub(READY_MARGIN);
+    let wait = request.wait_for.min(usable);
+    if wait.is_zero() {
+        return Ok(());
     }
-    let wait_end = now + request.wait_for;
+    let wait_end = now + wait;
     while Instant::now() < wait_end {
         if stop.stopped() {
             return Err(ScrapeError::fatal(STOPPING));
@@ -585,16 +621,21 @@ pub async fn run_scrape(
         apply_http_status(&mut result, status);
     }
     truncate_content(&mut result, request.max_chars);
-    // Fire and forget: the reply would only cost a round trip per page, and
-    // the next command on this connection skips it.
-    connection
+    // Best effort. The page is already extracted; a failed dispose must not
+    // drop it. Closing the socket still runs disposeOnDetach. Leaving the
+    // socket out of the pool forces the next checkout to reconnect.
+    if connection
         .send(
             "Target.disposeBrowserContext",
             json!({"browserContextId": target.context}),
             "",
             deadline,
         )
-        .await?;
+        .await
+        .is_err()
+    {
+        connection.ws = None;
+    }
     Ok(result)
 }
 
@@ -688,5 +729,82 @@ mod tests {
         let mut short = json!({"markdown": "hi"});
         truncate_content(&mut short, 4);
         assert!(short.get("warnings").is_none());
+    }
+
+    #[tokio::test]
+    async fn wait_for_clamps_inside_the_remaining_budget() {
+        let request = PageRequest {
+            url: "https://example.com".to_string(),
+            formats: vec![Format::Markdown],
+            only_main_content: true,
+            timeout: Duration::from_secs(30),
+            wait_for: Duration::from_secs(30),
+            wait_for_selector: String::new(),
+            wait_for_text: String::new(),
+            max_chars: 0,
+            markdown_links: "full",
+        };
+        let started = Instant::now();
+        let deadline = started + Duration::from_millis(20);
+        wait_after_load(&request, deadline, &Stop::channel())
+            .await
+            .expect("waitFor is clamped to the remaining budget");
+        assert!(started.elapsed() < Duration::from_millis(500));
+    }
+
+    #[test]
+    fn load_events_require_the_navigation_main_frame() {
+        let mut connection = Connection::new(Stop::channel());
+        connection.active_session = "session".to_string();
+        let load = json!({
+            "method": "Page.loadEventFired",
+            "sessionId": "session",
+        });
+        connection.observe(&load);
+        assert!(
+            !connection.page_loaded,
+            "about:blank load before navigate must not finish the wait"
+        );
+        connection.observe(&json!({
+            "method": "Page.lifecycleEvent",
+            "sessionId": "session",
+            "params": {"name": "load", "frameId": "main"},
+        }));
+        assert!(!connection.page_loaded);
+        connection.main_frame = "main".to_string();
+        connection.observe(&json!({
+            "method": "Page.lifecycleEvent",
+            "sessionId": "session",
+            "params": {"name": "load", "frameId": "child"},
+        }));
+        assert!(!connection.page_loaded);
+        connection.observe(&json!({
+            "method": "Page.lifecycleEvent",
+            "sessionId": "session",
+            "params": {"name": "load", "frameId": "main"},
+        }));
+        assert!(connection.page_loaded);
+        connection.page_loaded = false;
+        connection.observe(&load);
+        assert!(connection.page_loaded);
+    }
+
+    #[test]
+    fn only_a_dead_cdp_connection_reaps_the_browser() {
+        let reap = |message: &str| ScrapeError::Fatal(message.to_string()).reaps_browser();
+        assert!(reap(DISCONNECTED));
+        assert!(reap("Cannot write Lightpanda CDP command"));
+        assert!(reap("Lightpanda exited before opening its Unix socket"));
+        assert!(reap("Malformed CDP response envelope"));
+        assert!(reap("Invalid CDP JSON: recursion limit exceeded"));
+        assert!(reap("CDP response must be an object"));
+        assert!(reap("CDP result must be an object"));
+        assert!(!reap("Content readiness timed out"));
+        assert!(!reap("waitFor exceeds remaining operation timeout"));
+        assert!(!reap(TIMED_OUT));
+        assert!(!reap(STOPPING));
+        assert!(!reap(STOPPED));
+        assert!(!reap(TOO_LARGE));
+        assert!(!ScrapeError::Cdp("Runtime.evaluate: broken".to_string()).reaps_browser());
     }
 }

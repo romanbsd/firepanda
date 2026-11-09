@@ -132,8 +132,7 @@ pub fn input_schema() -> Value {
                 "query": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": QUERY_MAX_BYTES,
-                    "description": "Search query",
+                    "description": format!("Search query, at most {QUERY_MAX_BYTES} UTF-8 bytes"),
                 },
                 "limit": {
                     "type": "integer",
@@ -404,6 +403,13 @@ fn parse_brave(document: &str, base: &str) -> Vec<Item> {
     results
 }
 
+/// `DuckDuckGo`'s HTML endpoint wraps a result at `/l/?uddg=<absolute target>`.
+/// A `uddg` parameter on any other host or path belongs to that page.
+fn is_ddg_redirect(url: &url::Url) -> bool {
+    let host = url.host_str().unwrap_or("");
+    (host == "duckduckgo.com" || host.ends_with(".duckduckgo.com")) && url.path() == "/l/"
+}
+
 /// Resolve an engine href against the engine page and normalize it. Ad
 /// redirects and unsupported schemes are dropped.
 fn result_url(href: &str, base: &url::Url) -> Option<String> {
@@ -415,14 +421,18 @@ fn result_url(href: &str, base: &url::Url) -> Option<String> {
     // relative hrefs; `normalize_parsed` then applies Firepanda's own URL rules
     // (which also drop `javascript:` and other non-HTTP schemes).
     let mut target = base.join(href).ok()?;
-    // `DuckDuckGo` wraps results in `/l/?uddg=<encoded target>`; the URL
-    // parser re-encodes anything the decoded target cannot carry raw.
-    let wrapped = target
-        .query_pairs()
-        .find(|(key, _)| key == "uddg")
-        .map(|(_, value)| value.into_owned());
-    if let Some(wrapped) = wrapped {
-        target = base.join(&wrapped).ok()?;
+    if is_ddg_redirect(&target) {
+        // Only an absolute HTTP(S) target. `base.join` would turn an empty or
+        // relative `uddg` into another DuckDuckGo URL.
+        let wrapped = target
+            .query_pairs()
+            .find(|(key, _)| key == "uddg")
+            .map(|(_, value)| value.into_owned())?;
+        let next = url::Url::parse(&wrapped).ok()?;
+        if !matches!(next.scheme(), "http" | "https") {
+            return None;
+        }
+        target = next;
     }
     if target.as_str().contains("duckduckgo.com/y.js") {
         return None;
@@ -571,5 +581,14 @@ mod tests {
             result_url("/l/?uddg=https%3A%2F%2Fexample.com%2Fa%20b%2Bc&rut=x").as_deref(),
             Some("https://example.com/a%20b+c")
         );
+        // A uddg query on an ordinary result is the page's own parameter.
+        let kept = "https://victim.example/post?uddg=https://evil.example/";
+        assert_eq!(
+            result_url(kept).as_deref(),
+            Some(crate::tools::normalize_url(kept).unwrap().as_str())
+        );
+        assert_eq!(result_url("/l/?uddg="), None);
+        assert_eq!(result_url("/l/?uddg=hello"), None);
+        assert_eq!(result_url("/l/?uddg=/relative"), None);
     }
 }

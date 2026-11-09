@@ -114,7 +114,7 @@ class Fixture(http.server.BaseHTTPRequestHandler):
                     b'<a href="http://[invalid">Invalid</a><a href="mailto:test@example.com">Mail</a>'
                     b'<pre><code>first\n\n\n```literal\nlast\n</code></pre>'
                     b'<code>value`inside</code></main></body></html>')
-        elif self.path == "/markdown-structure":
+        elif self.path.split("?", 1)[0] == "/markdown-structure":
             body = (b'<html><head><title>Structure</title></head><body><main>'
                     b'<p># not a heading</p><p>1. not a list</p>'
                     b'<ol start="3"><li>three</li><li>four<ul><li>nested</li></ul></li></ol>'
@@ -128,6 +128,7 @@ class Fixture(http.server.BaseHTTPRequestHandler):
                     b'<img src="data:image/png;base64,AA==" alt="dot"><!-- note --></p>'
                     b'<p><img src="/noalt.png"><a href="/icon"><img src="/i.png"></a>'
                     b'<a href="/t?id=1&amp;utm_source=x&amp;fbclid=y&amp;q=a%20b">Tracked</a></p>'
+                    b'<p>Say <strong>\nhello\n</strong> there</p>'
                     b'</main></body></html>')
         elif self.path == "/wide-frontier":
             # Force unordered_set rehash while queue entries still reference its keys.

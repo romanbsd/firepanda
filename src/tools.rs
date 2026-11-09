@@ -339,13 +339,19 @@ fn schema_of(option: &OptionDef) -> Value {
             "default": option.fallback,
             "description": option.description,
         }),
-        // JSON Schema lengths count characters; validation also enforces UTF-8 bytes.
-        OptionKind::String => json!({
-            "type": "string",
-            "minLength": 1,
-            "maxLength": option.maximum,
-            "description": option.description,
-        }),
+        // `maxLength` counts characters. Validation uses UTF-8 bytes, so the
+        // byte cap lives in the description instead of a character limit.
+        OptionKind::String => {
+            let description = format!(
+                "{}, at most {} UTF-8 bytes",
+                option.description, option.maximum
+            );
+            json!({
+                "type": "string",
+                "minLength": 1,
+                "description": description,
+            })
+        }
         OptionKind::Boolean => json!({
             "type": "boolean",
             "default": option.fallback != 0,
@@ -436,12 +442,16 @@ pub fn parse_request(args: &Value, tool: Tool) -> Result<PageRequest, String> {
         .get("url")
         .and_then(Value::as_str)
         .ok_or_else(|| "url must be a string".to_string())?;
+    let timeout = parse_millis(args, "timeout")?;
+    // A wait longer than the page budget cannot finish; shorten it here so
+    // crawl pages inherit a wait that fits this request's own timeout.
+    let wait_for = parse_millis(args, "waitFor")?.min(timeout);
     let mut request = PageRequest {
         url: normalize_url(url)?,
         formats: Vec::new(),
         only_main_content: parse_boolean(args, "onlyMainContent")?,
-        timeout: parse_millis(args, "timeout")?,
-        wait_for: parse_millis(args, "waitFor")?,
+        timeout,
+        wait_for,
         wait_for_selector: parse_string(args, "waitForSelector")?,
         wait_for_text: parse_string(args, "waitForText")?,
         max_chars: usize::try_from(parse_integer(args, "maxChars")?)
@@ -667,6 +677,17 @@ mod tests {
     }
 
     #[test]
+    fn wait_for_is_clamped_to_the_page_timeout() {
+        let request = parse_request(
+            &json!({"url": "https://example.com", "timeout": 1000, "waitFor": 30000}),
+            Tool::Scrape,
+        )
+        .expect("valid request");
+        assert_eq!(request.timeout, Duration::from_millis(1000));
+        assert_eq!(request.wait_for, request.timeout);
+    }
+
+    #[test]
     fn schema_shape() {
         let list = tools_list();
         let tools = list.as_array().unwrap();
@@ -682,6 +703,13 @@ mod tests {
                     properties["engine"]["enum"],
                     json!(["auto", "duckduckgo", "brave"])
                 );
+                assert!(properties["query"].get("maxLength").is_none());
+                assert!(
+                    properties["query"]["description"]
+                        .as_str()
+                        .unwrap()
+                        .contains("UTF-8 bytes")
+                );
                 continue;
             }
             let properties = &tool["inputSchema"]["properties"];
@@ -696,6 +724,13 @@ mod tests {
             for name in ["waitForSelector", "waitForText"] {
                 assert_eq!(properties[name]["type"], "string");
                 assert_eq!(properties[name]["minLength"], 1);
+                assert!(properties[name].get("maxLength").is_none());
+                assert!(
+                    properties[name]["description"]
+                        .as_str()
+                        .unwrap()
+                        .contains("UTF-8 bytes")
+                );
             }
             let has_concurrency = properties.get("maxConcurrency").is_some();
             assert_eq!(

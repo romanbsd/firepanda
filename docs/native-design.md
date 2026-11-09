@@ -98,9 +98,11 @@ primp client (Chrome impersonation, connection pooling) performs the request und
 the tool deadline and reads the body in chunks up to 4 MiB. JSON, Markdown, XML,
 text, CSV, SVG, and unknown UTF-8 bodies return as `text`; other media types return
 base64. `text/html` and XHTML are rejected with a pointer to `scrape`, so a fetch
-never starts the managed browser. Redirects are followed. Responses keep their
-status code and body (including 4xx/5xx), matching an HTTP client rather than a
-scraper.
+never starts the managed browser. Redirects are followed for up to 10 hops.
+A hop with credentials, a non-HTTP scheme, port 0, or an over-long URL is
+refused before it is requested, and the client sends no Referer. The reported
+`url` is the normalized final URL. Responses keep their status code and body
+(including 4xx/5xx), matching an HTTP client rather than a scraper.
 
 The client negotiates HTTP/2 over TLS through ALPN (with Chrome's HTTP/2 stream and
 connection window settings) and falls back to HTTP/1.1; cleartext requests use
@@ -115,8 +117,9 @@ scraper (CSS parsing) and url are core dependencies, and primp is shared with
 `fetch`. The recipes follow `ddgs`: DuckDuckGo's HTML
 endpoint via GET (its form POST is answered with a cookie challenge from
 non-browser clients), and Brave's `data-type="web"` result blocks. DuckDuckGo
-redirect wrappers (`/l/?uddg=...`) are decoded, ad redirects (`y.js`) are dropped,
-and results are deduplicated by normalized URL. `auto` tries DuckDuckGo, then
+`/l/?uddg=` wrappers are decoded when the target is an absolute HTTP(S) URL; a
+`uddg` parameter on any other URL is left alone. Ad redirects (`y.js`) are
+dropped, and results are deduplicated by normalized URL. `auto` tries DuckDuckGo, then
 Brave; network/HTTP failures and empty result sets fall through, all under one
 total timeout.
 

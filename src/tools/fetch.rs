@@ -2,7 +2,7 @@
 //! other files bypass Lightpanda entirely; HTML is rejected with a pointer to
 //! `scrape`. Bodies are capped and every request runs under the tool deadline.
 
-use super::{Tool, check_keys, normalize_url, parse_millis};
+use super::{Tool, check_keys, normalize_parsed, normalize_url, parse_millis};
 use crate::http;
 use base64::Engine;
 use serde_json::Value;
@@ -37,9 +37,11 @@ pub async fn run(request: &Request) -> Result<Value, String> {
     let response = tokio::time::timeout_at(deadline, client.get(&request.url).send())
         .await
         .map_err(|_| "Fetch request timed out".to_string())?
-        .map_err(|error| format!("Fetch request failed: {}", error.without_url()))?;
+        .map_err(describe_request_error)?;
     let status = response.status().as_u16();
-    let final_url = response.url().to_string();
+    // The redirect policy already refused a bad hop. Normalize again so the
+    // reported URL drops a fragment and matches every other tool.
+    let final_url = normalize_parsed(response.url().clone())?;
     let content_type = response
         .headers()
         .get("content-type")
@@ -85,6 +87,15 @@ pub async fn run(request: &Request) -> Result<Value, String> {
         }
     }
     Ok(payload)
+}
+
+/// Include the redirect policy's reason. primp's own display is only
+/// "error following redirect".
+fn describe_request_error(error: primp::Error) -> String {
+    let error = error.without_url();
+    let source = std::error::Error::source(&error).map(ToString::to_string);
+    let detail = source.map_or_else(|| error.to_string(), |source| format!("{error}: {source}"));
+    format!("Fetch request failed: {detail}")
 }
 
 fn mime_type(content_type: &str) -> String {

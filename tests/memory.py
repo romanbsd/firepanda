@@ -73,9 +73,10 @@ with tempfile.TemporaryFile(mode="w+") as diagnostics:
         assert [page["metadata"]["url"] for page in flaky["pages"]] == [
             base + "/flaky-root", base + "/p/slow-a", base + "/p/slow-b"], flaky
         final_descriptors = descriptor_count()
-        # The pool may shrink when a failure reaps a warm multi-connection
-        # browser; it must never grow past the post-warm-up baseline.
-        assert baseline_descriptors is None or final_descriptors <= baseline_descriptors, (
+        # A broken document or a page timeout no longer reaps the browser, so
+        # the pool keeps the sockets a crawl window opened. Growth past that
+        # window is still a leak.
+        assert baseline_descriptors is None or final_descriptors <= baseline_descriptors + 4, (
             baseline_descriptors, final_descriptors)
         service.process.stdin.close()
         service.process.stdin = None
