@@ -70,31 +70,25 @@ static TOOL_TABLE: &[ToolDef] = &[
         id: Tool::Scrape,
         name: "scrape",
         title: "Scrape page",
-        description: "Fetch one page or document (HTML, Markdown, plain text, or a JSON \
-                      endpoint) and extract the requested formats. Use crawl or map for \
-                      multiple pages.",
+        description: "Render one page in a browser and extract the requested formats. Use crawl or map for many pages.",
     },
     ToolDef {
         id: Tool::Fetch,
         name: "fetch",
         title: "Fetch resource",
-        description: "Fetch one raw non-HTML resource over HTTP without starting the browser: \
-                      JSON, Markdown, XML, plain text, images, and other files. Use scrape for \
-                      rendered HTML.",
+        description: "Fetch one raw non-HTML resource (JSON, text, XML, images, files) without a browser. Use scrape for HTML.",
     },
     ToolDef {
         id: Tool::Crawl,
         name: "crawl",
         title: "Crawl site",
-        description: "Breadth-first crawl of same-origin pages. Returns pages and per-page \
-                      errors; bounded by depth, page count, 120 seconds, and result size.",
+        description: "Breadth-first crawl of same-origin pages; returns pages and per-page errors.",
     },
     ToolDef {
         id: Tool::Map,
         name: "map",
         title: "Map links",
-        description: "Discover links with a bounded same-origin crawl. External links are \
-                      listed but never followed. Not a sitemap or search engine.",
+        description: "List links found by a bounded same-origin crawl; external links are listed, not followed.",
     },
     ToolDef {
         id: Tool::Search,
@@ -159,19 +153,19 @@ const OPTIONS: [OptionDef; 12] = [
     opt!(
         "url",
         OptionKind::Url,
-        "Absolute HTTP(S) URL without credentials",
+        "HTTP(S) URL without credentials",
         tools = SCRAPE | CRAWL | MAP | FETCH
     ),
     opt!(
         "formats",
         OptionKind::Formats,
-        "Output formats to extract",
+        "Output formats",
         tools = SCRAPE | CRAWL
     ),
     opt!(
         "onlyMainContent",
         OptionKind::Boolean,
-        "Remove common page chrome and prefer main/article content",
+        "Drop page chrome; prefer main/article content",
         tools = SCRAPE | CRAWL,
         fallback = 1,
         minimum = 0,
@@ -180,7 +174,7 @@ const OPTIONS: [OptionDef; 12] = [
     opt!(
         "timeout",
         OptionKind::Integer,
-        "Total request budget in milliseconds",
+        "Time budget in ms; per page for crawl/map",
         tools = SCRAPE | CRAWL | MAP | FETCH,
         fallback = 30000,
         minimum = 100,
@@ -189,7 +183,7 @@ const OPTIONS: [OptionDef; 12] = [
     opt!(
         "waitFor",
         OptionKind::Integer,
-        "Extra wait after page load, within timeout",
+        "Extra ms to wait after load",
         tools = SCRAPE | CRAWL | MAP,
         fallback = 0,
         minimum = 0,
@@ -198,7 +192,7 @@ const OPTIONS: [OptionDef; 12] = [
     opt!(
         "waitForSelector",
         OptionKind::String,
-        "Wait for a CSS selector to match an element (presence, not visibility), within timeout.",
+        "Wait until this CSS selector matches",
         tools = SCRAPE | CRAWL | MAP,
         fallback = 0,
         minimum = 0,
@@ -207,7 +201,7 @@ const OPTIONS: [OptionDef; 12] = [
     opt!(
         "waitForText",
         OptionKind::String,
-        "Wait for literal case-sensitive body text outside scripts/styles/templates, within timeout.",
+        "Wait until body text contains this literal, case-sensitive string",
         tools = SCRAPE | CRAWL | MAP,
         fallback = 0,
         minimum = 0,
@@ -216,7 +210,7 @@ const OPTIONS: [OptionDef; 12] = [
     opt!(
         "maxChars",
         OptionKind::Integer,
-        "Truncate each content format to this many characters; 0 means no limit",
+        "Cut each content format to this many characters (0 = no limit)",
         tools = SCRAPE | CRAWL,
         fallback = 0,
         minimum = 0,
@@ -225,7 +219,7 @@ const OPTIONS: [OptionDef; 12] = [
     opt!(
         "markdownLinks",
         OptionKind::Choice(&["full", "relative", "none"]),
-        "Markdown link and image targets: full URLs, same-origin paths, or text only",
+        "Markdown link/image targets: full URL, same-origin path, or text only",
         tools = SCRAPE | CRAWL
     ),
     opt!(
@@ -249,7 +243,7 @@ const OPTIONS: [OptionDef; 12] = [
     opt!(
         "maxConcurrency",
         OptionKind::Integer,
-        "Pages fetched in flight at once during this crawl",
+        "Pages fetched at once",
         tools = CRAWL | MAP,
         fallback = 4,
         minimum = 1,
@@ -350,7 +344,7 @@ fn schema_of(option: &OptionDef) -> Value {
             "type": "string",
             "minLength": 1,
             "maxLength": option.maximum,
-            "description": format!("{} Maximum {} UTF-8 bytes.", option.description, option.maximum),
+            "description": option.description,
         }),
         OptionKind::Boolean => json!({
             "type": "boolean",

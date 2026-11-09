@@ -37,9 +37,8 @@ const BRAVE_OVERRIDE: &str = "FIREPANDA_SEARCH_BRAVE_URL";
 const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 
 /// Shared by `tools/list` and the tool table so the two cannot drift.
-pub const DESCRIPTION: &str = "Search the web without an API key using browser-impersonated \
-                               requests to DuckDuckGo and Brave. Returns titles, URLs, and \
-                               snippets.";
+pub const DESCRIPTION: &str =
+    "Web search via DuckDuckGo and Brave, no API key. Returns titles, URLs, and snippets.";
 
 /// Discriminants index the per-engine rate-limit slots.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -134,27 +133,27 @@ pub fn input_schema() -> Value {
                     "type": "string",
                     "minLength": 1,
                     "maxLength": QUERY_MAX_BYTES,
-                    "description": "Search query.",
+                    "description": "Search query",
                 },
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": MAX_LIMIT,
                     "default": DEFAULT_LIMIT,
-                    "description": "Maximum results to return.",
+                    "description": "Maximum results",
                 },
                 "engine": {
                     "type": "string",
                     "enum": ["auto", "duckduckgo", "brave"],
                     "default": "auto",
-                    "description": "Engine to use; auto falls back to the next engine.",
+                    "description": "auto tries each engine in turn",
                 },
                 "timeout": {
                     "type": "integer",
                     "minimum": MIN_TIMEOUT_MS,
                     "maximum": MAX_TIMEOUT_MS,
                     "default": DEFAULT_TIMEOUT_MS,
-                    "description": "Total search budget in milliseconds.",
+                    "description": "Time budget in ms",
                 },
             },
             "required": ["query"],
