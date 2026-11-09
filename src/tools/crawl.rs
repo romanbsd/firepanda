@@ -5,7 +5,8 @@
 //! results) before the browser is reaped and relaunched. Readiness, validation,
 //! and wait errors stay on that page.
 
-use super::{MAX_CRAWL_BYTES, MAX_LINKS, Tool, normalize_url, origin};
+use super::sitemap::{Collected, merge_links};
+use super::{MAX_CRAWL_BYTES, MAX_LINKS, MapQuery, Tool, normalize_url, origin};
 use crate::browser::{Browser, Format, PageError, PageRequest, PageTask};
 use crate::json::serialized_size_within;
 use serde_json::Value;
@@ -251,9 +252,17 @@ pub async fn run(
     limit: i64,
     max_depth: i64,
     concurrency: usize,
+    map: MapQuery,
 ) -> Value {
     let start_origin = request.url.clone();
     let deadline = Instant::now() + CRAWL_BUDGET;
+    // Same 120s budget as the walk. The sitemap task must not shorten dispatch.
+    let tokio_deadline = tokio::time::Instant::now() + CRAWL_BUDGET;
+    let site_origin = origin(&start_origin).to_string();
+    let sitemap_task = (tool == Tool::Map && map.sitemap).then(|| {
+        let origin = site_origin.clone();
+        tokio::spawn(async move { super::sitemap::collect(&origin, tokio_deadline).await })
+    });
     let page_timeout = request.timeout;
     let page_formats = if tool == Tool::Map {
         vec![Format::Links]
@@ -344,23 +353,105 @@ pub async fn run(
     }
 
     // Queued URLs already reached through a redirect were not left behind.
+    // Sitemap URLs stay off the frontier; join only after the walk.
+    let collected = join_sitemap(sitemap_task, &site_origin).await;
+    tool_result(tool, crawl, &map, collected)
+}
+
+/// The sitemap read never feeds the crawl queue. A panicked task is one error.
+async fn join_sitemap(
+    task: Option<tokio::task::JoinHandle<Collected>>,
+    site_origin: &str,
+) -> Collected {
+    let Some(handle) = task else {
+        return Collected {
+            pages: Vec::new(),
+            errors: Vec::new(),
+            truncated: false,
+        };
+    };
+    handle.await.unwrap_or_else(|_| Collected {
+        pages: Vec::new(),
+        errors: vec![error_record(
+            &format!("{site_origin}/robots.txt"),
+            "Sitemap read failed".to_string(),
+        )],
+        truncated: true,
+    })
+}
+
+fn tool_result(tool: Tool, crawl: Crawl, map: &MapQuery, collected: Collected) -> Value {
     let unvisited = crawl
         .queue
         .iter()
         .any(|(url, _)| !crawl.visited.contains(url));
+    let walk_truncated = crawl.truncated || unvisited;
+    if tool == Tool::Map {
+        return map_result(
+            crawl.links,
+            crawl.attempted,
+            crawl.errors,
+            crawl.warnings,
+            walk_truncated,
+            map,
+            &collected.pages,
+            collected.errors,
+            collected.truncated,
+        );
+    }
     let mut result = crate::json::object([
         ("attempted", Value::from(crawl.attempted)),
-        ("truncated", Value::Bool(crawl.truncated || unvisited)),
+        ("truncated", Value::Bool(walk_truncated)),
     ]);
     result["errors"] = Value::Array(crawl.errors);
     if !crawl.warnings.is_empty() {
         result["warnings"] = Value::Array(crawl.warnings);
     }
-    if tool == Tool::Map {
-        result["links"] = Value::Array(crawl.links);
-    } else {
-        result["pages"] = Value::Array(crawl.pages);
+    result["pages"] = Value::Array(crawl.pages);
+    result
+}
+
+/// Map payload. Omitted counts come from the merge. `truncated` is also set
+/// when the walk or a sitemap read stopped early.
+#[allow(
+    clippy::too_many_arguments,
+    clippy::redundant_pub_crate,
+    clippy::needless_pass_by_value
+)]
+pub(crate) fn map_result(
+    rendered: Vec<Value>,
+    attempted: i64,
+    mut errors: Vec<Value>,
+    warnings: Vec<Value>,
+    walk_truncated: bool,
+    query: &MapQuery,
+    sitemap_pages: &[String],
+    sitemap_errors: Vec<Value>,
+    sitemap_truncated: bool,
+) -> Value {
+    let merged = merge_links(
+        &rendered,
+        sitemap_pages,
+        &query.include_paths,
+        &query.exclude_paths,
+        query.link_limit,
+        MAX_CRAWL_BYTES,
+    );
+    errors.extend(sitemap_errors);
+    let mut result = crate::json::object([
+        ("attempted", Value::from(attempted)),
+        (
+            "truncated",
+            Value::Bool(walk_truncated || sitemap_truncated || merged.truncated),
+        ),
+        ("omittedRendered", Value::from(merged.omitted_rendered)),
+        ("omittedSitemap", Value::from(merged.omitted_sitemap)),
+    ]);
+    result["errors"] = Value::Array(errors);
+    if !warnings.is_empty() {
+        result["warnings"] = Value::Array(warnings);
     }
+    result["links"] = Value::Array(merged.links);
     result
 }
 
@@ -445,6 +536,114 @@ mod tests {
         assert!(crawl.links.len() < 5000, "{}", crawl.links.len());
         let encoded = serde_json::to_string(&crawl.links).expect("links json");
         assert!(encoded.len() <= MAX_CRAWL_BYTES, "{}", encoded.len());
+    }
+
+    #[test]
+    fn map_result_applies_the_cap() {
+        use super::super::MapQuery;
+
+        let rendered = vec![
+            json!({"url": "https://example.com/a"}),
+            json!({"url": "https://example.com/b"}),
+        ];
+        let filtered = MapQuery {
+            sitemap: false,
+            include_paths: vec!["/a".to_string()],
+            exclude_paths: vec![],
+            link_limit: Some(1),
+        };
+        let result = super::map_result(
+            rendered.clone(),
+            2,
+            vec![],
+            vec![],
+            false,
+            &filtered,
+            &[],
+            vec![],
+            false,
+        );
+        let links = result["links"].as_array().unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0]["url"], "https://example.com/a");
+        assert_eq!(result["omittedRendered"], json!(0));
+        assert_eq!(result["omittedSitemap"], json!(0));
+        assert_eq!(result["truncated"], json!(false));
+
+        let capped = MapQuery {
+            include_paths: vec![],
+            ..filtered
+        };
+        let result = super::map_result(
+            rendered,
+            2,
+            vec![],
+            vec![],
+            false,
+            &capped,
+            &[],
+            vec![],
+            false,
+        );
+        assert_eq!(result["links"].as_array().unwrap().len(), 1);
+        assert_eq!(result["links"][0]["url"], "https://example.com/a");
+        assert_eq!(result["omittedRendered"], json!(1));
+        assert_eq!(result["omittedSitemap"], json!(0));
+        assert_eq!(result["truncated"], json!(true));
+
+        let with_errors = super::map_result(
+            vec![json!({"url": "https://example.com/a"})],
+            1,
+            vec![json!({"url": "https://example.com/a", "error": "walk"})],
+            vec![],
+            false,
+            &MapQuery {
+                sitemap: false,
+                include_paths: vec![],
+                exclude_paths: vec![],
+                link_limit: None,
+            },
+            &[],
+            vec![json!({"url": "https://example.com/sitemap.xml", "error": "sitemap"})],
+            true,
+        );
+        assert_eq!(with_errors["truncated"], json!(true));
+        assert_eq!(with_errors["omittedRendered"], json!(0));
+        assert_eq!(with_errors["omittedSitemap"], json!(0));
+        assert_eq!(
+            with_errors["errors"],
+            json!([
+                {"url": "https://example.com/a", "error": "walk"},
+                {"url": "https://example.com/sitemap.xml", "error": "sitemap"},
+            ])
+        );
+    }
+
+    #[test]
+    fn sitemap_default_stops_at_100() {
+        let query = super::super::parse_map_query(&json!({
+            "url": "https://example.com",
+            "sitemap": true,
+        }))
+        .unwrap();
+        let pages: Vec<String> = (0..101)
+            .map(|n| format!("https://example.com/p/{n}"))
+            .collect();
+        let result = super::map_result(
+            vec![],
+            0,
+            vec![],
+            vec![],
+            false,
+            &query,
+            &pages,
+            vec![],
+            false,
+        );
+        assert_eq!(result["links"].as_array().unwrap().len(), 100);
+        assert_eq!(result["omittedRendered"], json!(0));
+        assert_eq!(result["omittedSitemap"], json!(1));
+        assert_eq!(result["truncated"], json!(true));
     }
 
     #[test]

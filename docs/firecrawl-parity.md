@@ -96,16 +96,23 @@ payload with warnings retained.
 ## map
 
 Implemented arguments: `url`, `limit` (1–100 attempts), `maxDepth` (0–5),
-`maxConcurrency` (1–16), `timeout`, and the `waitFor*` readiness options.
+`maxConcurrency` (1–16), `timeout`, the `waitFor*` readiness options, `sitemap`
+(default false), `includePaths`, `excludePaths`, and `linkLimit` (1–10000,
+default 100 when sitemap is on).
 
-Firecrawl's map uses its URL index/sitemap and accepts `search`, `sitemap`,
+Sitemap discovery is off by default. When it is on, Firepanda reads `Sitemap:`
+directives from robots.txt and XML sitemaps (indexes and URL sets). It does not
+open sitemap-only URLs. Path filters do not steer the walk. `linkLimit` is
+separate from the 100-attempt `limit`.
+
+Firecrawl's map uses its URL index and accepts `search`, `sitemap`,
 `includeSubdomains`, `ignoreQueryParameters`, `ignoreCache`, `location`, and
-`timeout` (default 60000). Firepanda instead runs a bounded same-origin BFS:
-external links are listed but never followed, and discovery depends on rendered
-anchors rather than a sitemap. `search`/`sitemap`/subdomain options are not
-implemented, and the limit maximum is 100 attempts rather than 5000 links.
+`timeout` (default 60000). Firepanda runs a bounded same-origin BFS: external
+links are listed but never followed. `search` and subdomain options are not
+implemented, and `limit` is 100 navigation attempts rather than 5000 links.
 
-Response: `links` (`{url, title}`), `attempted`, `errors`, and `truncated`.
+Response: `links` (`{url, title}`, or `{url}` for a sitemap-only URL),
+`attempted`, `errors`, `truncated`, `omittedRendered`, and `omittedSitemap`.
 Firecrawl also returns `success` and a per-link `description`; Firepanda's
 extractor does not collect link descriptions.
 

@@ -153,6 +153,44 @@ class Fixture(http.server.BaseHTTPRequestHandler):
         elif self.path in ("/large", "/too-large"):
             size = 256 * 1024 if self.path == "/large" else 9 * 1024 * 1024
             body = ("<html><title>Large fixture</title><main><p>" + "x" * size + "</p></main></html>").encode()
+        elif self.path == "/company-start":
+            body = b'<html><main><a href="/company">Company</a></main></html>'
+        elif self.path == "/company":
+            body = (b'<html><main><a href="/careers">Careers</a>'
+                    b'<a href="https://example.com/outside">Outside</a></main></html>')
+        elif self.path == "/careers":
+            body = b"<html><main></main></html>"
+        elif self.path == "/robots.txt":
+            host = self.headers.get("Host", "127.0.0.1")
+            body = f"Sitemap: http://{host}/sitemap.xml\n".encode()
+            content_type = "text/plain"
+        elif self.path == "/sitemap.xml":
+            body = (b"<?xml version=\"1.0\"?><sitemapindex>"
+                    b"<sitemap><loc>/child-a.xml</loc></sitemap>"
+                    b"<sitemap><loc>/bad.xml</loc></sitemap>"
+                    b"<sitemap><loc>/child-b.xml</loc></sitemap>"
+                    b"</sitemapindex>")
+            content_type = "application/xml"
+        elif self.path == "/child-a.xml":
+            host = self.headers.get("Host", "127.0.0.1")
+            origin = f"http://{host}"
+            body = (f"<?xml version=\"1.0\"?><urlset>"
+                    f"<url><loc>https://other.test/off</loc></url>"
+                    f"<url><loc>{origin}/company</loc></url>"
+                    f"<url><loc>{origin}/careers/role</loc><priority>0.1</priority>"
+                    f"<lastmod>1999-01-01</lastmod></url>"
+                    f"<url><loc>{origin}/sitemap-only</loc></url>"
+                    f"</urlset>").encode()
+            content_type = "application/xml"
+        elif self.path == "/child-b.xml":
+            host = self.headers.get("Host", "127.0.0.1")
+            origin = f"http://{host}"
+            body = (f"<?xml version=\"1.0\"?><urlset>"
+                    f"<url><loc>{origin}/second-doc</loc></url></urlset>").encode()
+            content_type = "application/xml"
+        elif self.path == "/bad.xml":
+            body = b"not xml"
+            content_type = "text/plain"
         else:
             body = ("<html><head><title>Fixture</title></head><body><nav>Noise</nav><main>"
                     "<h1>Native Firepanda</h1><p id='dynamic'>Before JS</p>"

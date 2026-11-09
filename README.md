@@ -179,6 +179,15 @@ Browser tools (`scrape`, `crawl`, `map`) share:
 | `maxDepth` | `1` | Crawl/map only: 0–5; the starting page has depth 0 |
 | `maxConcurrency` | `4` | Crawl/map only: 1–16 pages fetched at once |
 
+`map` also accepts:
+
+| Argument | Default | Behavior |
+| --- | --- | --- |
+| `sitemap` | `false` | Read `Sitemap:` directives from robots.txt and merge same-origin sitemap URLs. Off by default. Does not open those URLs in the browser. |
+| `includePaths` | `[]` | Path prefixes a returned link must match. Empty allows every path. Does not change which pages are opened. |
+| `excludePaths` | `[]` | Path prefixes removed from the returned links. Does not change which pages are opened. |
+| `linkLimit` | `100` when `sitemap` is true; otherwise no extra cap | Maximum links to return, from 1 to 10000. This is not `limit` (navigation attempts). When `sitemap` is false and `linkLimit` is omitted, the 10000-link ceiling and 1 MiB crawl byte budget still apply. |
+
 Search takes its own arguments:
 
 | Argument | Default | Behavior |
@@ -207,7 +216,7 @@ deliberately never starts the browser.
 Links have `{url, title}` records; link targets drop `utm_*`, `fbclid`, and
 `gclid` parameters, and Markdown omits images without alt text.
 `crawl` returns `pages`, `attempted`, `errors`, and `truncated`.
-`map` returns `links`, `attempted`, `errors`, and `truncated`.
+`map` returns `links`, `attempted`, `errors`, `truncated`, `omittedRendered`, and `omittedSitemap`.
 `search` returns Firecrawl v2-shaped data: `{"success": true, "data": {"web":
 [{"title", "description", "url"}]}}`, deduplicated by normalized URL in engine
 order.
@@ -312,6 +321,8 @@ See [design details](docs/native-design.md) for code structure and protocol beha
 | Fetch body | 4 MiB raw (base64 output stays under the 8 MiB result cap) |
 | Search results | 20 per call; 60-second budget maximum |
 | Search response body | 8 MiB |
+| Sitemap documents | 32 after robots.txt, 8 MiB each, inside the 120-second crawl budget |
+| Map `linkLimit` | 1–10000; default 100 when `sitemap` is true |
 
 Exactly reaching a link cap without omitting anything is complete. Dropped links
 set `linksTruncated` on scrape output and propagate `truncated` to crawl/map.

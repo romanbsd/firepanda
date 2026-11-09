@@ -4,6 +4,8 @@
 
 mod crawl;
 mod fetch;
+mod paths;
+mod sitemap;
 
 use crate::browser::{Browser, Format, PageRequest};
 use crate::json::as_integer;
@@ -16,6 +18,8 @@ pub const MAX_LINKS: usize = 10000;
 const MAX_URL_BYTES: usize = 8192;
 /// Serialization budget for crawl results.
 const MAX_CRAWL_BYTES: usize = 1024 * 1024;
+/// Longest accepted `includePaths` or `excludePaths` prefix.
+const MAX_PREFIX_BYTES: usize = 2048;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
@@ -88,7 +92,7 @@ static TOOL_TABLE: &[ToolDef] = &[
         id: Tool::Map,
         name: "map",
         title: "Map links",
-        description: "List links found by a bounded same-origin crawl; external links are listed, not followed.",
+        description: "List links found by a bounded same-origin crawl; external links are listed, not followed. Optionally merge same-origin URLs from robots.txt sitemaps without opening them.",
     },
     ToolDef {
         id: Tool::Search,
@@ -107,6 +111,8 @@ enum OptionKind {
     Formats,
     /// One of a fixed set of strings; the first is the default.
     Choice(&'static [&'static str]),
+    /// Array of strings. `maximum` is `maxItems`.
+    StringList,
 }
 
 /// One row per accepted argument. The advertised schema, validation bounds,
@@ -149,7 +155,7 @@ macro_rules! opt {
     };
 }
 
-const OPTIONS: [OptionDef; 12] = [
+const OPTIONS: [OptionDef; 16] = [
     opt!(
         "url",
         OptionKind::Url,
@@ -249,6 +255,42 @@ const OPTIONS: [OptionDef; 12] = [
         minimum = 1,
         maximum = 16
     ),
+    opt!(
+        "sitemap",
+        OptionKind::Boolean,
+        "Read Sitemap directives from robots.txt and merge sitemap URLs. Off by default. Does not open those URLs in the browser.",
+        tools = MAP,
+        fallback = 0,
+        minimum = 0,
+        maximum = 0
+    ),
+    opt!(
+        "includePaths",
+        OptionKind::StringList,
+        "Path prefixes a returned link must match. Empty allows every path. A prefix matches on a segment boundary and does not change which pages are opened.",
+        tools = MAP,
+        fallback = 0,
+        minimum = 0,
+        maximum = 32
+    ),
+    opt!(
+        "excludePaths",
+        OptionKind::StringList,
+        "Path prefixes removed from the returned links. Matching does not change which pages are opened.",
+        tools = MAP,
+        fallback = 0,
+        minimum = 0,
+        maximum = 32
+    ),
+    opt!(
+        "linkLimit",
+        OptionKind::Integer,
+        "Maximum links to return, from 1 to 10000. Defaults to 100 when sitemap is true. When omitted with sitemap false, the existing link and byte ceilings apply.",
+        tools = MAP,
+        fallback = 0,
+        minimum = 1,
+        maximum = 10_000
+    ),
 ];
 
 fn find_option(name: &str) -> Option<&'static OptionDef> {
@@ -332,13 +374,19 @@ fn parse_millis(args: &Value, name: &str) -> Result<Duration, String> {
 
 fn schema_of(option: &OptionDef) -> Value {
     match option.kind {
-        OptionKind::Integer => json!({
-            "type": "integer",
-            "minimum": option.minimum,
-            "maximum": option.maximum,
-            "default": option.fallback,
-            "description": option.description,
-        }),
+        OptionKind::Integer => {
+            let mut schema = json!({
+                "type": "integer",
+                "minimum": option.minimum,
+                "maximum": option.maximum,
+                "description": option.description,
+            });
+            // An omitted `linkLimit` is not a numeric default. Zero means absent.
+            if option.name != "linkLimit" {
+                schema["default"] = Value::from(option.fallback);
+            }
+            schema
+        }
         // `maxLength` counts characters. Validation uses UTF-8 bytes, so the
         // byte cap lives in the description instead of a character limit.
         OptionKind::String => {
@@ -372,6 +420,13 @@ fn schema_of(option: &OptionDef) -> Value {
             "type": "string",
             "enum": choices,
             "default": choices[0],
+            "description": option.description,
+        }),
+        OptionKind::StringList => json!({
+            "type": "array",
+            "items": {"type": "string"},
+            "maxItems": option.maximum,
+            "default": [],
             "description": option.description,
         }),
     }
@@ -434,6 +489,70 @@ fn check_keys(args: &Value, tool: Tool) -> Result<(), String> {
         .keys()
         .find(|key| find_option(key).is_none_or(|option| option.applies & tool.bit() == 0))
         .map_or(Ok(()), |key| Err(format!("Unknown argument: {key}")))
+}
+
+/// Map return filters and the optional sitemap read.
+pub struct MapQuery {
+    pub sitemap: bool,
+    pub include_paths: Vec<String>,
+    pub exclude_paths: Vec<String>,
+    pub link_limit: Option<usize>,
+}
+
+/// Read map return filters. `link_limit` is `None` when the key is absent and
+/// `sitemap` is false. `sitemap: true` without `linkLimit` uses 100.
+pub fn parse_map_query(args: &Value) -> Result<MapQuery, String> {
+    let sitemap = parse_boolean(args, "sitemap")?;
+    let mut link_limit = match args.get("linkLimit") {
+        None => None,
+        Some(value) => {
+            let option = known_option("linkLimit");
+            let limit = bounded_integer(value, "linkLimit", option.minimum, option.maximum)?;
+            Some(usize::try_from(limit).expect("linkLimit bounds are nonnegative"))
+        }
+    };
+    let include_paths = parse_prefixes(args, "includePaths")?;
+    let exclude_paths = parse_prefixes(args, "excludePaths")?;
+    if sitemap && link_limit.is_none() {
+        link_limit = Some(100);
+    }
+    Ok(MapQuery {
+        sitemap,
+        include_paths,
+        exclude_paths,
+        link_limit,
+    })
+}
+
+fn parse_prefixes(args: &Value, name: &str) -> Result<Vec<String>, String> {
+    let Some(value) = args.get(name) else {
+        return Ok(Vec::new());
+    };
+    let Some(list) = value.as_array() else {
+        return Err(format!("{name} must be an array of strings"));
+    };
+    let max_items = usize::try_from(known_option(name).maximum).expect("prefix cap is nonnegative");
+    if list.len() > max_items {
+        return Err(format!("{name} accepts at most {max_items} prefixes"));
+    }
+    let mut prefixes = Vec::with_capacity(list.len());
+    for value in list {
+        let Some(text) = value.as_str() else {
+            return Err(format!("{name} must be an array of strings"));
+        };
+        if text.is_empty()
+            || text.len() > MAX_PREFIX_BYTES
+            || !text.starts_with('/')
+            || text.contains('?')
+            || text.contains('#')
+        {
+            return Err(format!(
+                "{name} entries must be path prefixes of at most {MAX_PREFIX_BYTES} bytes starting with '/' and containing no '?' or '#'"
+            ));
+        }
+        prefixes.push(text.to_string());
+    }
+    Ok(prefixes)
 }
 
 pub fn parse_request(args: &Value, tool: Tool) -> Result<PageRequest, String> {
@@ -558,6 +677,16 @@ pub async fn execute(browser: &Browser, name: &str, args: &Value) -> Result<Valu
     let limit = parse_integer(args, "limit").map_err(CallError::Invalid)?;
     let max_depth = parse_integer(args, "maxDepth").map_err(CallError::Invalid)?;
     let concurrency = parse_integer(args, "maxConcurrency").map_err(CallError::Invalid)?;
+    let map_query = if tool == Tool::Map {
+        parse_map_query(args).map_err(CallError::Invalid)?
+    } else {
+        MapQuery {
+            sitemap: false,
+            include_paths: Vec::new(),
+            exclude_paths: Vec::new(),
+            link_limit: None,
+        }
+    };
     Ok(crawl::run(
         browser,
         tool,
@@ -565,6 +694,7 @@ pub async fn execute(browser: &Browser, name: &str, args: &Value) -> Result<Valu
         limit,
         max_depth,
         usize::try_from(concurrency).expect("maxConcurrency bounds are nonnegative"),
+        map_query,
     )
     .await)
 }
@@ -742,6 +872,90 @@ mod tests {
                 assert_eq!(properties["maxConcurrency"]["minimum"], 1);
                 assert_eq!(properties["maxConcurrency"]["maximum"], 16);
             }
+            let map_only = ["sitemap", "includePaths", "excludePaths", "linkLimit"];
+            let is_map = tool["name"] == "map";
+            for name in map_only {
+                assert_eq!(properties.get(name).is_some(), is_map, "{name}");
+            }
+            if is_map {
+                assert_eq!(properties["sitemap"]["type"], "boolean");
+                assert_eq!(properties["sitemap"]["default"], json!(false));
+                assert_eq!(properties["includePaths"]["type"], "array");
+                assert_eq!(properties["includePaths"]["items"]["type"], "string");
+                assert_eq!(properties["includePaths"]["maxItems"], 32);
+                assert_eq!(properties["includePaths"]["default"], json!([]));
+                assert_eq!(properties["excludePaths"]["type"], "array");
+                assert_eq!(properties["excludePaths"]["maxItems"], 32);
+                assert_eq!(properties["excludePaths"]["default"], json!([]));
+                assert_eq!(properties["linkLimit"]["type"], "integer");
+                assert_eq!(properties["linkLimit"]["minimum"], 1);
+                assert_eq!(properties["linkLimit"]["maximum"], 10000);
+                assert!(properties["linkLimit"].get("default").is_none());
+                let description = properties["linkLimit"]["description"].as_str().unwrap();
+                assert!(description.contains("100"), "{description}");
+                assert!(description.contains("sitemap"), "{description}");
+            }
         }
+    }
+
+    #[test]
+    fn parse_map_query() {
+        let bare = super::parse_map_query(&json!({"url": "https://example.com"})).unwrap();
+        assert!(!bare.sitemap);
+        assert_eq!(bare.include_paths, Vec::<String>::new());
+        assert_eq!(bare.exclude_paths, Vec::<String>::new());
+        assert_eq!(bare.link_limit, None);
+
+        let query = super::parse_map_query(&json!({
+            "includePaths": ["/careers"],
+            "excludePaths": ["/careers/draft"],
+            "linkLimit": 5,
+        }))
+        .unwrap();
+        assert!(!query.sitemap);
+        assert_eq!(query.include_paths, vec!["/careers".to_string()]);
+        assert_eq!(query.exclude_paths, vec!["/careers/draft".to_string()]);
+        assert_eq!(query.link_limit, Some(5));
+
+        let accepted = super::parse_map_query(&json!({"includePaths": ["/careers-old"]})).unwrap();
+        assert_eq!(accepted.include_paths, vec!["/careers-old".to_string()]);
+
+        let sitemap_default =
+            super::parse_map_query(&json!({"url": "https://example.com", "sitemap": true}))
+                .unwrap();
+        assert!(sitemap_default.sitemap);
+        assert_eq!(sitemap_default.link_limit, Some(100));
+        let sitemap_capped =
+            super::parse_map_query(&json!({"sitemap": true, "linkLimit": 5})).unwrap();
+        assert!(sitemap_capped.sitemap);
+        assert_eq!(sitemap_capped.link_limit, Some(5));
+
+        let at_item_cap = vec!["/a"; 32];
+        assert!(super::parse_map_query(&json!({"includePaths": at_item_cap})).is_ok());
+        let at_byte_cap = format!("/{}", "a".repeat(2047));
+        assert!(super::parse_map_query(&json!({"includePaths": [at_byte_cap]})).is_ok());
+
+        let too_many = vec!["/a"; 33];
+        let too_long = format!("/{}", "a".repeat(2048));
+        for args in [
+            json!({"includePaths": ["careers"]}),
+            json!({"includePaths": [""]}),
+            json!({"includePaths": ["/a?b"]}),
+            json!({"includePaths": ["/a#b"]}),
+            json!({"includePaths": too_many}),
+            json!({"includePaths": [too_long]}),
+            json!({"includePaths": "nope"}),
+            json!({"linkLimit": 0}),
+            json!({"linkLimit": 10001}),
+        ] {
+            assert!(super::parse_map_query(&args).is_err(), "{args}");
+        }
+
+        let crawl_error = parse_request(
+            &json!({"url": "https://example.com", "excludePaths": ["/a"]}),
+            Tool::Crawl,
+        )
+        .unwrap_err();
+        assert_eq!(crawl_error, "Unknown argument: excludePaths");
     }
 }

@@ -74,8 +74,12 @@ class Protocol(unittest.TestCase):
                 # Map always extracts links: projection options would be no-ops.
                 self.assertNotIn("formats", properties)
                 self.assertNotIn("onlyMainContent", properties)
+                self.assertTrue({"sitemap", "includePaths", "excludePaths", "linkLimit"} <= set(properties))
             else:
                 self.assertIn("formats", properties)
+            if tool["name"] == "crawl":
+                for name in ("sitemap", "includePaths", "excludePaths", "linkLimit"):
+                    self.assertNotIn(name, properties)
             if tool["name"] != "scrape":
                 self.assertEqual(properties["maxConcurrency"]["default"], 4)
                 self.assertEqual(properties["maxConcurrency"]["minimum"], 1)

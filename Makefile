@@ -26,6 +26,7 @@ gates: build
 	python3 tests/fetch.py $(BINARY) $(LIGHTPANDA)
 	python3 tests/search.py $(BINARY) $(LIGHTPANDA)
 	python3 tests/integration.py $(BINARY) $(LIGHTPANDA)
+	python3 tests/map_sitemap.py $(BINARY) $(LIGHTPANDA)
 	python3 tests/memory.py $(BINARY) $(LIGHTPANDA)
 
 install: release
