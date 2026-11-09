@@ -74,12 +74,21 @@
   // A deliberately small DOM-to-Markdown renderer for common article content.
   const escape = s => s.replace(/([\\`*_[\]])/g, '\\$1');
   const base = document.baseURI || location.href;
+  // Drop click-tracking parameters (utm_*, fbclid, gclid). The query is
+  // filtered pair by pair so every other parameter keeps its exact encoding.
+  const tracking = /^(?:utm_[^=]*|fbclid|gclid)(?:=|$)/i;
+  const untracked = url => {
+    if (!url.search) return url;
+    const pairs = url.search.slice(1).split('&'), kept = pairs.filter(pair => !tracking.test(pair));
+    if (kept.length !== pairs.length) url.search = kept.length ? '?' + kept.join('&') : '';
+    return url;
+  };
   // Resolve an href/src; only HTTP(S) targets become Markdown links or images.
   const resolve = value => {
     if (value === null) return '';
     try {
       const url = new URL(value, base);
-      return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : '';
+      return url.protocol === 'http:' || url.protocol === 'https:' ? untracked(url).href : '';
     } catch { return ''; }
   };
   // Named anchors are plain text; an empty href is a valid link to the base.
@@ -87,7 +96,7 @@
   const target = url => '(<' + url.replace(/>/g, '%3E') + '>)';
   // Jumps within this page (citation markers, tables of contents) read as
   // plain text: their targets repeat the page URL and cost many tokens.
-  const page = location.href.split('#')[0];
+  const page = untracked(new URL(location.href)).href.split('#')[0];
   const samePage = url => url.includes('#') && url.split('#')[0] === page;
   // markdownLinks: "full" keeps absolute targets, "relative" shortens
   // same-origin ones to their path, "none" keeps only link text / alt text.
@@ -159,12 +168,16 @@
     if (tag === 'a') {
       const url = linkURL(n);
       if (!url || samePage(url) || options.markdownLinks === 'none') return body();
-      return '[' + body().trim() + ']' + target(shown(url));
+      const text = body().trim();
+      // A link whose only content was an alt-less image says nothing; drop it.
+      return text ? '[' + text + ']' + target(shown(url)) : '';
     }
     if (tag === 'img') {
       const alt = escape((n.getAttribute('alt') || '').replace(/\s+/g, ' ').trim());
       const src = resolve(n.getAttribute('src'));
+      // No alt text means nothing for a reader: spacers, trackers, decoration.
       // data: and other non-HTTP sources keep only their alt text.
+      if (!alt) return '';
       return src && options.markdownLinks !== 'none' ? '![' + alt + ']' + target(shown(src)) : alt;
     }
     if (tag === 'strong' || tag === 'b' || tag === 'em' || tag === 'i') {

@@ -158,7 +158,7 @@ impl Connection {
             return;
         };
         // Status must be an integer 100..=599: 201.5 and 99/600 never become
-        // an httpStatus.
+        // a statusCode.
         let number = match response.get("status").and_then(Value::as_i64) {
             Some(status) if (100..=599).contains(&status) => status,
             _ => return,
@@ -529,9 +529,7 @@ fn push_warning(result: &mut Value, code: &str, message: String) {
 }
 
 fn apply_http_status(result: &mut Value, status: i64) {
-    result["metadata"]["httpStatus"] = json!(status);
-    // Firecrawl names the same value `statusCode`; emit both so clients can
-    // read either without a translation layer.
+    // Firecrawl's metadata name; one field, as Firecrawl and its MCP send.
     result["metadata"]["statusCode"] = json!(status);
     if status >= 400 {
         push_warning(
@@ -634,7 +632,7 @@ mod tests {
             connection.early_document_statuses,
             [("child".to_string(), 503)]
         );
-        // Fractional statuses never become httpStatus; integers under 100 or
+        // Fractional statuses never become statusCode; integers under 100 or
         // over 599 are ignored too.
         connection.observe(&event("main", json!(99)));
         connection.observe(&event("main", json!(600)));
@@ -679,7 +677,8 @@ mod tests {
         validate_extraction(&mut good, &request).unwrap();
         assert_eq!(good["metadata"]["sourceURL"], "https://example.com");
         apply_http_status(&mut good, 503);
-        assert_eq!(good["metadata"]["httpStatus"], 503);
+        assert_eq!(good["metadata"]["statusCode"], 503);
+        assert!(good["metadata"].get("httpStatus").is_none());
         assert_eq!(good["warnings"][0]["code"], "http_error");
         let mut long = json!({"markdown": "héllo wörld", "text": "ok"});
         truncate_content(&mut long, 4);

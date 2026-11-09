@@ -203,8 +203,9 @@ sniffed (NUL-free UTF-8 becomes text) and otherwise returned as base64. A
 deliberately never starts the browser.
 
 `scrape` returns requested fields plus `metadata` (`url`, `sourceURL`, `title`,
-`description`, and `httpStatus`/`statusCode` when observed). `statusCode` is the
-Firecrawl-compatible alias of `httpStatus`. Links have `{url, title}` records.
+`description` when present, and `statusCode` when observed, as in Firecrawl).
+Links have `{url, title}` records; link targets drop `utm_*`, `fbclid`, and
+`gclid` parameters, and Markdown omits images without alt text.
 `crawl` returns `pages`, `attempted`, `errors`, and `truncated`.
 `map` returns `links`, `attempted`, `errors`, and `truncated`.
 `search` returns Firecrawl v2-shaped data: `{"success": true, "data": {"web":

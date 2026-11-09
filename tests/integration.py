@@ -50,7 +50,7 @@ try:
     assert len(tool_list["tools"]) == 5
     ready = tool("scrape", url=url + "/ready", waitForSelector="#ready", waitForText="Content ready", timeout=3000)
     assert "**ready**" in ready["markdown"], ready
-    assert ready["metadata"]["httpStatus"] == 200, ready
+    assert ready["metadata"]["statusCode"] == 200, ready
     for path, phrase in (('/ready-character-data', 'Character ready'),
                          ('/ready-body-replacement', 'Replacement ready'),
                          ('/ready-no-observer', 'Content ready')):
@@ -68,14 +68,14 @@ try:
     assert "suspected_block" in [w["code"] for w in challenge["warnings"]], challenge
     assert "verification" in challenge["markdown"], challenge
     error_page = tool("scrape", url=url + "/error-page")
-    assert error_page["metadata"]["httpStatus"] == 200, error_page
+    assert error_page["metadata"]["statusCode"] == 200, error_page
     assert [w["code"] for w in error_page["warnings"]] == ["suspected_error_page"], error_page
     actual_error = tool("scrape", url=url + "/http-redirect")
-    assert actual_error["metadata"]["httpStatus"] == 503, actual_error
     assert actual_error["metadata"]["statusCode"] == 503, actual_error
+    assert "httpStatus" not in actual_error["metadata"], actual_error
     assert [w["code"] for w in actual_error["warnings"]] == ["http_error"], actual_error
     good = tool("scrape", url=url + "/http-ok-subframe")
-    assert good["metadata"]["httpStatus"] == 200 and "warnings" not in good, good
+    assert good["metadata"]["statusCode"] == 200 and "warnings" not in good, good
     assert "warnings" not in tool("scrape", url=url + "/ordinary-article")
     empty = tool("scrape", url=url + "/empty")
     assert [w["code"] for w in empty["warnings"]] == ["empty_content"], empty
@@ -89,7 +89,7 @@ try:
     warning_map = tool("map", url=url + "/http-error", limit=1, maxDepth=0)
     assert warning_map["warnings"][0]["warnings"][-1]["code"] == "http_error", warning_map
     warning_crawl = tool("crawl", url=url + "/http-error", limit=1, maxDepth=0)
-    assert warning_crawl["pages"][0]["metadata"]["httpStatus"] == 503, warning_crawl
+    assert warning_crawl["pages"][0]["metadata"]["statusCode"] == 503, warning_crawl
     listing = tool("scrape", url=url + "/listing", formats=["markdown", "text", "html", "rawHtml"])
     for text in ("All products", "First product", "First description", "Second product", "Second description"):
         for format in ("markdown", "text", "html"):
@@ -149,6 +149,8 @@ try:
     tidy = tool("scrape", url=url + "/markdown-structure", formats=["text"])
     assert "Indented\n\ntext" in tidy["text"] and "  keep\n    indent" in tidy["text"], tidy
     assert "description" not in tidy["metadata"], tidy["metadata"]
+    assert "noalt.png" not in structure and "/icon" not in structure, structure
+    assert f"[Tracked](<{url}/t?id=1&q=a%20b>)" in structure, structure
     relative = tool("scrape", url=url + "/markdown-structure", markdownLinks="relative")["markdown"]
     assert "[k](</k>)" in relative and "![Picture](</pic.png>)" in relative, relative
     bare = tool("scrape", url=url + "/markdown-structure", markdownLinks="none")["markdown"]

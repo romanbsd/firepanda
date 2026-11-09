@@ -126,6 +126,8 @@ class Fixture(http.server.BaseHTTPRequestHandler):
                     b'<div>\n      Indented\n\n\n\n      text</div><pre>  keep\n    indent</pre>'
                     b'<p class="c" id="p1" data-x="1" onclick="f()">Styled <a href="/k" rel="nofollow" class="l">k</a>'
                     b'<img src="data:image/png;base64,AA==" alt="dot"><!-- note --></p>'
+                    b'<p><img src="/noalt.png"><a href="/icon"><img src="/i.png"></a>'
+                    b'<a href="/t?id=1&amp;utm_source=x&amp;fbclid=y&amp;q=a%20b">Tracked</a></p>'
                     b'</main></body></html>')
         elif self.path == "/wide-frontier":
             # Force unordered_set rehash while queue entries still reference its keys.

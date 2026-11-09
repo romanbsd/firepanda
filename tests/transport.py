@@ -210,11 +210,11 @@ class Transport(unittest.TestCase):
     def test_status_is_observed_main_document_only_and_optional(self):
         self.peer.mode = "status"
         self.send()
-        self.assertEqual(json.loads(self.receive()["content"][0]["text"])["metadata"]["httpStatus"], 201)
+        self.assertEqual(json.loads(self.receive()["content"][0]["text"])["metadata"]["statusCode"], 201)
         for mode in ("valid", "no_network", "fractional_status"):
             self.peer.mode = mode
             self.send()
-            self.assertNotIn("httpStatus", json.loads(self.receive()["content"][0]["text"])["metadata"])
+            self.assertNotIn("statusCode", json.loads(self.receive()["content"][0]["text"])["metadata"])
 
     def test_control_frame_and_fragment_deadlines(self):
         for mode in ("pings", "fragments"):

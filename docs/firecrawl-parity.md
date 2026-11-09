@@ -66,8 +66,8 @@ Response shape differs: Firepanda returns the payload directly
 (`{markdown, …, metadata, warnings?}`), not Firecrawl's `{success, data}` envelope.
 `metadata` includes `url`, `sourceURL`, `title`, `description` (only when the
 page has one), and
-`httpStatus`/`statusCode` (the Firecrawl name) when the main-document status is
-observed. Firecrawl's single `warning` string is replaced by a `warnings` array of
+`statusCode` when the main-document status is observed (Firecrawl's name and
+its only status field). Firecrawl's single `warning` string is replaced by a `warnings` array of
 `{code, message}` records. Links are `{url, title}` records; `map` omits empty
 titles. Markdown renders same-page fragment links (citations, tables of
 contents) as plain text, and `text` drops source indentation outside `<pre>`.
