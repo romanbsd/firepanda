@@ -7,7 +7,7 @@ mod fetch;
 mod paths;
 mod sitemap;
 
-use crate::browser::{Browser, Format, PageRequest};
+use crate::browser::{Browser, Format, MAX_PAGE_TIMEOUT_MS, PageRequest};
 use crate::json::as_integer;
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -184,7 +184,7 @@ const OPTIONS: [OptionDef; 16] = [
         tools = SCRAPE | CRAWL | MAP | FETCH,
         fallback = 30000,
         minimum = 100,
-        maximum = 120_000
+        maximum = MAX_PAGE_TIMEOUT_MS
     ),
     opt!(
         "waitFor",

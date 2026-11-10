@@ -212,7 +212,7 @@ mod tests {
         // A deliberately missing binary: tool-error tests must not depend on
         // a Lightpanda install being present in PATH.
         let options = Options {
-            lightpanda: "/missing/lightpanda".to_string(),
+            program: "/missing/lightpanda".to_string(),
             ..Options::default()
         };
         Server::new(options, Stop::channel())

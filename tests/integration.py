@@ -1,4 +1,4 @@
-"""Actual native Lightpanda + local fixture website. No external website needed."""
+"""Actual native browser (Lightpanda or Obscura) + local fixture website."""
 import http.server
 import os
 import shlex
@@ -8,17 +8,17 @@ import threading
 import time
 import tempfile
 
-binary, lightpanda = sys.argv[1:3]
-
-
 from fixtures import Fixture
-from harness import Service, structured
+from harness import Service, backend_from, browser_service, structured
+
+binary, browser = sys.argv[1:3]
+backend = backend_from(sys.argv)
 
 
 server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Fixture)
 threading.Thread(target=server.serve_forever, daemon=True).start()
 url = "http://127.0.0.1:" + str(server.server_port)
-service = Service([binary, "--lightpanda", lightpanda])
+service = browser_service(binary, backend, browser)
 
 
 def children():
@@ -31,10 +31,10 @@ def children():
 def child():
     pids = children()
     assert len(pids) == 1, pids
-    command = subprocess.check_output(["ps", "-p", str(pids[0]), "-o", "command="], text=True)
-    args = shlex.split(command)
-    path = args[args.index("--unix-socket") + 1]
-    return pids[0], path
+    command_line = subprocess.check_output(["ps", "-p", str(pids[0]), "-o", "command="], text=True)
+    args = shlex.split(command_line)
+    key = "--unix-socket" if "--unix-socket" in args else "--ready-file"
+    return pids[0], args[args.index(key) + 1]
 
 
 def rpc(method, **params):
@@ -233,7 +233,7 @@ try:
     assert "Rendered by JavaScript" in recovered["markdown"]
     final_child, socket_path = child()
     assert final_child == first_child, "A page timeout must reuse the browser"
-    print("PASS: native UDS WebSocket, JS, formats, crawl/map, timeout recovery, reuse, private permissions")
+    print("PASS: backend WebSocket, JS, formats, crawl/map, timeout recovery, reuse, private permissions")
 finally:
     service.process.stdin.close()
     try:
@@ -249,10 +249,10 @@ try:
 except ProcessLookupError:
     pass
 else:
-    raise AssertionError("Native Lightpanda child survived EOF")
+    raise AssertionError("Native browser child survived EOF")
 
 # The MCP service remains available after its lazily started browser goes idle.
-service = Service([binary, "--lightpanda", lightpanda, "--idle-timeout", "1"])
+service = browser_service(binary, backend, browser, "--idle-timeout", "1")
 try:
     assert len(rpc("tools/list")["tools"]) == 5
     assert not children(), "Tool discovery must not launch the browser"
@@ -288,7 +288,7 @@ finally:
     service.process.wait(timeout=10)
 assert service.process.returncode == 0
 
-service = Service([binary, "--lightpanda", lightpanda, "--idle-timeout", "0"])
+service = browser_service(binary, backend, browser, "--idle-timeout", "0")
 try:
     tool("scrape", url=url)
     warm_pid, _ = child()
@@ -302,15 +302,27 @@ print("PASS: lazy launch, quiet/active MCP idle expiry, restart, active-request 
 
 # An independently managed browser must survive idle timeouts and Firepanda shutdown.
 with tempfile.TemporaryDirectory(prefix="firepanda-external-", dir="/tmp") as directory:
-    sock = directory + "/cdp.sock"
-    external = subprocess.Popen([lightpanda, "serve", "--unix-socket", sock, "--log-level", "error"])
+    if backend == "obscura":
+        sock = directory + "/cdp.json"
+        external = subprocess.Popen([browser, "serve", "--host", "127.0.0.1", "--port", "0",
+                                     "--ready-file", sock, "--workers", "1",
+                                     "--allow-private-network"])
+    else:
+        sock = directory + "/cdp.sock"
+        external = subprocess.Popen([browser, "serve", "--unix-socket", sock, "--log-level", "error"])
     try:
-        for _ in range(200):
+        for _ in range(500):
             if os.path.exists(sock):
                 break
             assert external.poll() is None, "External browser exited"
             time.sleep(0.01)
-        service = Service([binary, "--socket", sock, "--idle-timeout", "1"])
+        if backend == "obscura":
+            import json
+            ready = json.loads(open(sock, encoding="utf-8").read())
+            endpoint = f"ws://{ready['host']}:{ready['port']}{ready['websocket_path']}"
+            service = Service([binary, "--cdp-url", endpoint, "--idle-timeout", "1"])
+        else:
+            service = Service([binary, "--socket", sock, "--idle-timeout", "1"])
         try:
             assert len(rpc("tools/list")["tools"]) == 5
             assert "Rendered by JavaScript" in tool("scrape", url=url)["markdown"]
@@ -318,7 +330,7 @@ with tempfile.TemporaryDirectory(prefix="firepanda-external-", dir="/tmp") as di
             assert external.poll() is None, "Idle timeout terminated an external browser"
             failed = rpc("tools/call", name="scrape", arguments={"url": url + "/slow", "timeout": 100})
             assert failed["isError"] and external.poll() is None, failed
-            assert os.path.exists(sock), "Failure cleanup removed an external socket"
+            assert os.path.exists(sock), "Failure cleanup removed an external endpoint"
             assert "Rendered by JavaScript" in tool("scrape", url=url)["markdown"]
         finally:
             service.process.stdin.close()
@@ -333,7 +345,7 @@ print("PASS: EOF cleanup and external-browser ownership")
 # Exercise both a blocked CDP read and the post-load wait, which must be interruptible.
 def check_sigterm(arguments):
     global service
-    service = Service([binary, "--lightpanda", lightpanda])
+    service = browser_service(binary, backend, browser)
     try:
         tool("scrape", url=url)
         owned_pid, owned_socket = child()

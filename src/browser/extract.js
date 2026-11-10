@@ -56,9 +56,12 @@
     if (options.onlyMainContent) {
       // SPAs keep inactive views in the DOM; a hidden <main> must not displace visible content.
       root.querySelectorAll('[hidden],[aria-hidden="true"],[style]').forEach(e => {
-        const style = e.style;
-        if (e.hasAttribute('hidden') || e.getAttribute('aria-hidden') === 'true' ||
-            style?.display === 'none' || style?.visibility === 'hidden') e.remove();
+        // Inline styles are read from the attribute rather than the
+        // CSSStyleDeclaration: engines differ on `!important` parsing, and the
+        // clone is detached from the document anyway.
+        const style = (e.getAttribute('style') || '').toLowerCase();
+        const hidden = /(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*hidden)\b/.test(style);
+        if (e.hasAttribute('hidden') || e.getAttribute('aria-hidden') === 'true' || hidden) e.remove();
       });
       root.querySelectorAll('nav,footer,aside').forEach(e => e.remove());
       // Article/section headers contain headlines and bylines; only discard page chrome.
@@ -71,9 +74,18 @@
       content = main || (articles.length === 1 && articles[0]) || content;
     }
   }
+  // Non-HTML documents (JSON, plain text) have no markup to render. Browsers
+  // disagree on the wrapper (Lightpanda uses <pre>, Obscura a bare text node),
+  // so normalize to one fenced block and keep the body verbatim.
+  const contentType = (document.contentType || '').toLowerCase();
+  if (contentType && contentType !== 'text/html' && contentType !== 'application/xhtml+xml' &&
+      !content.querySelector('pre,textarea')) {
+    const pre = content.ownerDocument.createElement('pre');
+    pre.textContent = content.textContent || '';
+    content.replaceChildren(pre);
+  }
   // A deliberately small DOM-to-Markdown renderer for common article content.
-  const escape = s => s.replace(/([\\`*_[\]])/g, '\\$1');
-  const base = document.baseURI || location.href;
+  const escape = s => s.replace(/([\\`*_[\]])/g, '\\$1');  const base = document.baseURI || location.href;
   // Drop click-tracking parameters (utm_*, fbclid, gclid). The query is
   // filtered pair by pair so every other parameter keeps its exact encoding.
   const tracking = /^(?:utm_[^=]*|fbclid|gclid)(?:=|$)/i;

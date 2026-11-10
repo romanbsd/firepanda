@@ -75,3 +75,17 @@ class Service:
         result = self.call("tools/call", name=name, arguments=arguments)
         assert not result.get("isError"), result
         return structured(result)
+
+
+def backend_from(argv, index=3):
+    """Backend argument after the binary and browser, defaulting to Lightpanda."""
+    return argv[index] if len(argv) > index else "lightpanda"
+
+
+def browser_command(binary, backend, browser, *extra):
+    """Argv for a managed Lightpanda or Obscura service."""
+    return [binary, "--backend", backend, "--browser", browser, *extra]
+
+
+def browser_service(binary, backend, browser, *extra, env=None):
+    return Service(browser_command(binary, backend, browser, *extra), env=env)

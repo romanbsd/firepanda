@@ -2,7 +2,7 @@
 //! per-page scrape pipeline. `tests/transport.py` pins the adversarial
 //! behavior.
 
-use super::{Format, PageRequest, Stop};
+use super::{CdpStream, Format, PageRequest, Stop};
 use crate::tools::MAX_LINKS;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -13,51 +13,43 @@ use tokio_tungstenite::tungstenite::Message;
 const EXTRACTION_JS: &str = include_str!("extract.js");
 
 const STOPPING: &str = "Service is stopping";
-const STOPPED: &str = "Lightpanda operation timed out or service is stopping";
-const TIMED_OUT: &str = "Lightpanda operation timed out";
-const DISCONNECTED: &str = "Lightpanda CDP disconnected or returned a non-text frame";
-const TOO_LARGE: &str = "Lightpanda reply exceeds 16 MiB; request fewer formats";
+const STOPPED: &str = "Browser operation timed out or service is stopping";
+const TIMED_OUT: &str = "Browser operation timed out";
+const DISCONNECTED: &str = "CDP disconnected or returned a non-text frame";
+const TOO_LARGE: &str = "Browser reply exceeds 16 MiB; request fewer formats";
 /// Readiness budget held back from the extractor for the reply round trip.
 const READY_MARGIN: Duration = Duration::from_millis(250);
 
-/// CDP rejection (peer answered with an `error` object) versus transport,
-/// deadline, stop, and validation failures. Both surface as tool errors;
-/// only `Network.enable` distinguishes them.
+/// CDP rejection (peer answered with an `error` object), a page-level failure
+/// (readiness, validation, extraction), or a transport failure that makes the
+/// socket — and possibly the browser — unusable.
 #[derive(Debug)]
 pub enum ScrapeError {
     Cdp(String),
-    Fatal(String),
+    Page(String),
+    Transport(String),
 }
 
 impl ScrapeError {
     pub fn message(self) -> String {
         match self {
-            Self::Cdp(message) | Self::Fatal(message) => message,
+            Self::Cdp(message) | Self::Page(message) | Self::Transport(message) => message,
         }
     }
 
     /// The browser process is reusable after a page error unless this socket
     /// can no longer speak CDP. Readiness, validation, and ordinary rejections
     /// drop the connection only.
-    pub fn reaps_browser(&self) -> bool {
-        let Self::Fatal(message) = self else {
-            return false;
-        };
-        message == DISCONNECTED
-            || [
-                "Cannot write Lightpanda CDP command",
-                "Lightpanda exited",
-                "Malformed CDP",
-                "Invalid CDP JSON",
-                "CDP response",
-                "CDP result",
-            ]
-            .iter()
-            .any(|prefix| message.starts_with(prefix))
+    pub const fn reaps_browser(&self) -> bool {
+        matches!(self, Self::Transport(_))
     }
 
-    fn fatal(message: impl Into<String>) -> Self {
-        Self::Fatal(message.into())
+    fn page(message: impl Into<String>) -> Self {
+        Self::Page(message.into())
+    }
+
+    fn transport(message: impl Into<String>) -> Self {
+        Self::Transport(message.into())
     }
 }
 
@@ -72,28 +64,36 @@ struct PageTarget {
     session: String,
 }
 
-pub struct Connection {
-    ws: Option<tokio_tungstenite::WebSocketStream<tokio::net::UnixStream>>,
-    stop: Stop,
-    next_id: u64,
-    active_session: String,
-    page_loaded: bool,
+/// Page-scoped CDP observations. Reset for every browser context so a new page
+/// can never inherit flags or statuses from the previous one.
+#[derive(Debug, Default)]
+struct PageState {
+    loaded: bool,
     main_frame: String,
     http_status: Option<i64>,
     early_document_statuses: Vec<(String, i64)>,
+    /// Frame ids whose `load` lifecycle event arrived before `Page.navigate`
+    /// returned. Obscura flushes command side-effect events before the reply
+    /// (Chromium semantics), so the document load can precede `main_frame`.
+    early_loads: Vec<String>,
+}
+
+pub struct Connection {
+    ws: Option<CdpStream>,
+    stop: Stop,
+    next_id: u64,
+    active_session: String,
+    page: PageState,
 }
 
 impl Connection {
-    pub const fn new(stop: Stop) -> Self {
+    pub fn new(stop: Stop) -> Self {
         Self {
             ws: None,
             stop,
             next_id: 0,
             active_session: String::new(),
-            page_loaded: false,
-            main_frame: String::new(),
-            http_status: None,
-            early_document_statuses: Vec::new(),
+            page: PageState::default(),
         }
     }
 
@@ -101,53 +101,55 @@ impl Connection {
         self.ws.is_some()
     }
 
-    pub fn attach(
-        &mut self,
-        websocket: tokio_tungstenite::WebSocketStream<tokio::net::UnixStream>,
-    ) {
+    pub fn attach(&mut self, websocket: CdpStream) {
         self.ws = Some(websocket);
     }
 
     /// Read one CDP message before `deadline`, or fail. `StreamExt::next` is
     /// cancel-safe, so the stop/deadline arms of the select can drop a pending
     /// read without losing buffered bytes.
-    async fn receive(&mut self, deadline: Instant) -> Result<Value, String> {
+    async fn receive(&mut self, deadline: Instant) -> Result<Value, ScrapeError> {
         loop {
             if self.stop.stopped() {
-                return Err(STOPPING.to_string());
+                return Err(ScrapeError::page(STOPPING));
             }
             if Instant::now() >= deadline {
-                return Err(TIMED_OUT.to_string());
+                return Err(ScrapeError::page(TIMED_OUT));
             }
-            let ws = self.ws.as_mut().ok_or_else(|| DISCONNECTED.to_string())?;
+            let ws = self
+                .ws
+                .as_mut()
+                .ok_or_else(|| ScrapeError::transport(DISCONNECTED))?;
             let read = tokio::select! {
-                () = self.stop.wait() => return Err(STOPPING.to_string()),
-                () = tokio::time::sleep_until(deadline.into()) => return Err(TIMED_OUT.to_string()),
+                () = self.stop.wait() => return Err(ScrapeError::page(STOPPING)),
+                () = tokio::time::sleep_until(deadline.into()) => return Err(ScrapeError::page(TIMED_OUT)),
                 message = ws.next() => message,
             };
             // A read finishing at/after the deadline counts as a failed read,
             // not a clean timeout.
             if self.stop.stopped() || Instant::now() >= deadline {
-                return Err(STOPPED.to_string());
+                return Err(ScrapeError::page(STOPPED));
             }
             match read {
                 // The stream ending (None) is a disconnect like a close frame.
-                None => return Err(DISCONNECTED.to_string()),
-                Some(Ok(Message::Text(text))) => return parse_message(text.as_str()),
+                None => return Err(ScrapeError::transport(DISCONNECTED)),
+                Some(Ok(Message::Text(text))) => {
+                    return parse_message(text.as_str()).map_err(ScrapeError::transport);
+                }
                 Some(Ok(Message::Ping(payload))) => {
-                    // Lightpanda may keepalive mid-scrape; answering inside the
+                    // A peer may keepalive mid-scrape; answering inside the
                     // read loop keeps a control frame from failing the page.
                     ws.send(Message::Pong(payload))
                         .await
-                        .map_err(|_| DISCONNECTED.to_string())?;
+                        .map_err(|_| ScrapeError::transport(DISCONNECTED))?;
                 }
                 Some(Ok(Message::Pong(_) | Message::Frame(_))) => {}
                 // The WebSocket size cap, not a crash: say what to change.
                 Some(Err(tokio_tungstenite::tungstenite::Error::Capacity(_))) => {
-                    return Err(TOO_LARGE.to_string());
+                    return Err(ScrapeError::page(TOO_LARGE));
                 }
                 Some(Ok(Message::Close(_) | Message::Binary(_)) | Err(_)) => {
-                    return Err(DISCONNECTED.to_string());
+                    return Err(ScrapeError::transport(DISCONNECTED));
                 }
             }
         }
@@ -156,31 +158,61 @@ impl Connection {
     /// Fold the events that matter for one page (load flag, main-document
     /// status) without retaining multi-megabyte event bodies.
     fn observe(&mut self, message: &Value) {
-        let method = string_member(message, "method");
-        let session_id = string_member(message, "sessionId");
-        // `Page.loadEventFired` has no frame id. Ignore it until navigate has
-        // stored `main_frame`, so an about:blank load during `Page.enable`
-        // cannot finish the wait. A child frame's `loadEventFired` still has
-        // no id and can satisfy the wait after that. `Page.lifecycleEvent`
-        // `"load"` is accepted only for the main frame.
-        if session_id == self.active_session && !self.main_frame.is_empty() {
-            if method == "Page.loadEventFired" {
-                self.page_loaded = true;
-            } else if method == "Page.lifecycleEvent"
-                && let Some(params) = message.get("params")
-                && string_member(params, "name") == "load"
-                && string_member(params, "frameId") == self.main_frame
-            {
-                self.page_loaded = true;
-            }
+        if string_member(message, "sessionId") != self.active_session {
+            return;
         }
-        if method != "Network.responseReceived" || session_id != self.active_session {
+        self.observe_load(message);
+        self.observe_status(message);
+    }
+
+    /// `Page.loadEventFired` has no frame id. Ignore it until navigate has
+    /// stored the document frame, so an about:blank load during `Page.enable`
+    /// cannot finish the wait. A child frame's `loadEventFired` still has no id
+    /// and can satisfy the wait after that. `Page.lifecycleEvent` `"load"` is
+    /// accepted only for the main frame.
+    fn observe_load(&mut self, message: &Value) {
+        let method = string_member(message, "method");
+        let params = message.get("params");
+        let load = method == "Page.lifecycleEvent"
+            && params.is_some_and(|params| string_member(params, "name") == "load");
+        if self.page.main_frame.is_empty() {
+            // Obscura flushes navigation events before the `Page.navigate`
+            // reply, so the document load can arrive before its frame id is
+            // known. Buffer frame ids; `Page.loadEventFired` stays ignored
+            // because it carries no frame id.
+            if load
+                && let Some(frame) = params.map(|params| string_member(params, "frameId"))
+                && !frame.is_empty()
+                && self.page.early_loads.len() < 16
+                && !self.page.early_loads.iter().any(|seen| seen == frame)
+            {
+                self.page.early_loads.push(frame.to_string());
+            }
+        } else if method == "Page.loadEventFired"
+            || load
+                && params
+                    .is_some_and(|params| string_member(params, "frameId") == self.page.main_frame)
+        {
+            self.page.loaded = true;
+        }
+    }
+
+    fn observe_status(&mut self, message: &Value) {
+        if string_member(message, "method") != "Network.responseReceived" {
             return;
         }
         let Some(params) = message.get("params").filter(|value| value.is_object()) else {
             return;
         };
         if string_member(params, "type") != "Document" {
+            return;
+        }
+        // A main-document response shares the navigation loader's request id.
+        // Obscura reports iframe documents with the page's frame id, so the
+        // frame alone cannot tell them apart; the request id can.
+        let request = string_member(params, "requestId");
+        let loader = string_member(params, "loaderId");
+        if !request.is_empty() && !loader.is_empty() && request != loader {
             return;
         }
         let frame = match params.get("frameId") {
@@ -196,19 +228,22 @@ impl Connection {
             Some(status) if (100..=599).contains(&status) => status,
             _ => return,
         };
-        if !self.main_frame.is_empty() {
+        if !self.page.main_frame.is_empty() {
             // Subframe responses cannot overwrite the document.
-            if *frame == self.main_frame {
-                self.http_status = Some(number);
+            if *frame == self.page.main_frame {
+                self.page.http_status = Some(number);
             }
         } else if let Some(entry) = self
+            .page
             .early_document_statuses
             .iter_mut()
             .find(|(id, _)| id == frame)
         {
             entry.1 = number;
-        } else if self.early_document_statuses.len() < 16 {
-            self.early_document_statuses.push((frame.clone(), number));
+        } else if self.page.early_document_statuses.len() < 16 {
+            self.page
+                .early_document_statuses
+                .push((frame.clone(), number));
         }
     }
 
@@ -234,20 +269,20 @@ impl Connection {
             envelope.insert("sessionId".to_string(), Value::String(session.to_string()));
         }
         let Ok(payload) = serde_json::to_string(&Value::Object(envelope)) else {
-            return Err(ScrapeError::fatal("Cannot write Lightpanda CDP command"));
+            return Err(ScrapeError::transport("Cannot write CDP command"));
         };
         let ws = self
             .ws
             .as_mut()
-            .ok_or_else(|| ScrapeError::fatal(DISCONNECTED))?;
+            .ok_or_else(|| ScrapeError::transport(DISCONNECTED))?;
         // The deadline owns writes too: a peer that stops reading must not
         // outlive the operation.
         let sent = tokio::select! {
-            () = self.stop.wait() => return Err(ScrapeError::fatal(STOPPING)),
+            () = self.stop.wait() => return Err(ScrapeError::page(STOPPING)),
             sent = tokio::time::timeout_at(deadline.into(), ws.send(Message::text(payload))) => sent,
         };
         if !matches!(sent, Ok(Ok(()))) {
-            return Err(ScrapeError::fatal("Cannot write Lightpanda CDP command"));
+            return Err(ScrapeError::transport("Cannot write CDP command"));
         }
         Ok(id)
     }
@@ -262,9 +297,9 @@ impl Connection {
     ) -> Result<Value, ScrapeError> {
         let id = self.send(method, params, session, deadline).await?;
         loop {
-            let mut response = self.receive(deadline).await.map_err(ScrapeError::fatal)?;
+            let mut response = self.receive(deadline).await?;
             let Some(object) = response.as_object() else {
-                return Err(ScrapeError::fatal("CDP response must be an object"));
+                return Err(ScrapeError::transport("CDP response must be an object"));
             };
             match object.get("id") {
                 // No id can never match; keep observing.
@@ -273,7 +308,9 @@ impl Connection {
                     continue;
                 }
                 Some(value) => match crate::json::as_integer(value) {
-                    None => return Err(ScrapeError::fatal("CDP response id must be an integer")),
+                    None => {
+                        return Err(ScrapeError::transport("CDP response id must be an integer"));
+                    }
                     Some(number) if number != i128::from(id) => {
                         self.observe(&response);
                         continue;
@@ -286,13 +323,13 @@ impl Connection {
             if (!session.is_empty() && string_member(&response, "sessionId") != session)
                 || has_result == has_error
             {
-                return Err(ScrapeError::fatal("Malformed CDP response envelope"));
+                return Err(ScrapeError::transport("Malformed CDP response envelope"));
             }
             if has_error {
                 return Err(ScrapeError::Cdp(format!("{method}: {}", object["error"])));
             }
             if !object.get("result").is_some_and(Value::is_object) {
-                return Err(ScrapeError::fatal("CDP result must be an object"));
+                return Err(ScrapeError::transport("CDP result must be an object"));
             }
             // Move the result out of the envelope: extraction replies carry
             // the whole page payload, so cloning here would duplicate it.
@@ -304,8 +341,8 @@ impl Connection {
     }
 
     async fn loaded(&mut self, deadline: Instant) -> Result<(), ScrapeError> {
-        while !self.page_loaded {
-            let message = self.receive(deadline).await.map_err(ScrapeError::fatal)?;
+        while !self.page.loaded {
+            let message = self.receive(deadline).await?;
             self.observe(&message);
         }
         Ok(())
@@ -335,7 +372,7 @@ async fn open_page(
         .await?
         .get("browserContextId")
         .and_then(Value::as_str)
-        .ok_or_else(|| ScrapeError::fatal("Missing browserContextId in CDP result"))?
+        .ok_or_else(|| ScrapeError::transport("Missing browserContextId in CDP result"))?
         .to_string();
     let page = connection
         .call(
@@ -347,7 +384,7 @@ async fn open_page(
         .await?
         .get("targetId")
         .and_then(Value::as_str)
-        .ok_or_else(|| ScrapeError::fatal("Missing targetId in CDP result"))?
+        .ok_or_else(|| ScrapeError::transport("Missing targetId in CDP result"))?
         .to_string();
     let session = connection
         .call(
@@ -359,12 +396,10 @@ async fn open_page(
         .await?
         .get("sessionId")
         .and_then(Value::as_str)
-        .ok_or_else(|| ScrapeError::fatal("Missing sessionId in CDP result"))?
+        .ok_or_else(|| ScrapeError::transport("Missing sessionId in CDP result"))?
         .to_string();
     connection.active_session.clone_from(&session);
-    connection.main_frame.clear();
-    connection.http_status = None;
-    connection.early_document_statuses.clear();
+    connection.page = PageState::default();
     Ok(PageTarget { context, session })
 }
 
@@ -384,7 +419,7 @@ async fn navigate(
     {
         // Older CDP peers may lack Network; transport/timeouts still fail.
     }
-    connection.page_loaded = false;
+    connection.page.loaded = false;
     let navigation = connection
         .call(
             "Page.navigate",
@@ -393,20 +428,31 @@ async fn navigate(
             deadline,
         )
         .await?;
-    connection.main_frame = string_member(&navigation, "frameId").to_string();
+    connection.page.main_frame = string_member(&navigation, "frameId").to_string();
     // Responses observed before the frame id was known belong to the document
     // only if they match the main frame; subframes never overwrite it.
-    let early = std::mem::take(&mut connection.early_document_statuses);
+    let early = std::mem::take(&mut connection.page.early_document_statuses);
     for (frame, status) in early {
-        if !connection.main_frame.is_empty() && frame == connection.main_frame {
-            connection.http_status = Some(status);
+        if !connection.page.main_frame.is_empty() && frame == connection.page.main_frame {
+            connection.page.http_status = Some(status);
         }
+    }
+    // A load event delivered before the navigate reply counts once its frame
+    // matches the document frame.
+    let early_load = connection
+        .page
+        .early_loads
+        .iter()
+        .any(|frame| frame == &connection.page.main_frame);
+    connection.page.early_loads.clear();
+    if early_load {
+        connection.page.loaded = true;
     }
     if navigation.get("errorText").is_some() {
         let text = navigation["errorText"]
             .as_str()
-            .ok_or_else(|| ScrapeError::fatal("Page.navigate errorText must be a string"))?;
-        return Err(ScrapeError::fatal(text));
+            .ok_or_else(|| ScrapeError::transport("Page.navigate errorText must be a string"))?;
+        return Err(ScrapeError::page(text));
     }
     connection.loaded(deadline).await
 }
@@ -429,11 +475,11 @@ async fn wait_after_load(
     let wait_end = now + wait;
     while Instant::now() < wait_end {
         if stop.stopped() {
-            return Err(ScrapeError::fatal(STOPPING));
+            return Err(ScrapeError::page(STOPPING));
         }
         let slice = std::cmp::min(wait_end, Instant::now() + Duration::from_millis(50));
         tokio::select! {
-            () = stop.wait() => return Err(ScrapeError::fatal(STOPPING)),
+            () = stop.wait() => return Err(ScrapeError::page(STOPPING)),
             () = tokio::time::sleep_until(slice.into()) => {}
         }
     }
@@ -468,15 +514,18 @@ async fn extract(
     let expression = format!("{EXTRACTION_JS}({extraction})");
     // Move the expression string into the params map: `json!` would clone it,
     // and it carries the whole embedded extractor.
-    let mut params = serde_json::Map::with_capacity(3);
+    let mut params = serde_json::Map::with_capacity(4);
     params.insert("expression".to_string(), Value::String(expression));
     params.insert("returnByValue".to_string(), Value::Bool(true));
     params.insert("awaitPromise".to_string(), Value::Bool(true));
+    // Obscura defaults an evaluation to 30 s regardless of the page budget.
+    // Keep the in-page readiness wait inside a longer `timeout`.
+    params.insert("timeout".to_string(), Value::from(remaining.max(1)));
     let mut value = connection
         .call("Runtime.evaluate", Value::Object(params), session, deadline)
         .await?;
     if value.get("exceptionDetails").is_some() {
-        return Err(ScrapeError::fatal(format!(
+        return Err(ScrapeError::page(format!(
             "Page extraction failed: {}",
             value["exceptionDetails"]
         )));
@@ -485,7 +534,7 @@ async fn extract(
         .get_mut("result")
         .and_then(|inner| inner.get_mut("value"))
         .map(Value::take)
-        .ok_or_else(|| ScrapeError::fatal("Page extraction failed: missing result value"))
+        .ok_or_else(|| ScrapeError::transport("Page extraction failed: missing result value"))
 }
 
 /// Reject malformed page payloads before they enter a crawl result.
@@ -496,7 +545,7 @@ fn validate_extraction(result: &mut Value, request: &PageRequest) -> Result<(), 
         .and_then(|metadata| metadata.get("url"))
         .is_some_and(Value::is_string);
     if !metadata_ok {
-        return Err(ScrapeError::fatal("Malformed page extraction metadata"));
+        return Err(ScrapeError::page("Malformed page extraction metadata"));
     }
     for format in &request.formats {
         let valid = match result.get(format.as_str()) {
@@ -505,7 +554,7 @@ fn validate_extraction(result: &mut Value, request: &PageRequest) -> Result<(), 
             Some(value) => value.is_string(),
         };
         if !valid {
-            return Err(ScrapeError::fatal(format!(
+            return Err(ScrapeError::page(format!(
                 "Missing or invalid extraction format: {format}"
             )));
         }
@@ -513,27 +562,27 @@ fn validate_extraction(result: &mut Value, request: &PageRequest) -> Result<(), 
     if let Some(links) = result.get("links") {
         let array = links.as_array().filter(|links| links.len() <= MAX_LINKS);
         let Some(links) = array else {
-            return Err(ScrapeError::fatal("Invalid extraction links"));
+            return Err(ScrapeError::page("Invalid extraction links"));
         };
         for link in links {
             let valid = link.is_object()
                 && link.get("url").is_some_and(Value::is_string)
                 && (link.get("title").is_none() || link["title"].is_string());
             if !valid {
-                return Err(ScrapeError::fatal("Malformed extraction link"));
+                return Err(ScrapeError::page("Malformed extraction link"));
             }
         }
     }
     if let Some(flag) = result.get("linksTruncated")
         && !flag.is_boolean()
     {
-        return Err(ScrapeError::fatal("Invalid extraction truncation flag"));
+        return Err(ScrapeError::page("Invalid extraction truncation flag"));
     }
     result["metadata"]["sourceURL"] = json!(request.url);
     if let Some(warnings) = result.get("warnings") {
         let array = warnings.as_array().filter(|warnings| warnings.len() <= 3);
         let Some(warnings) = array else {
-            return Err(ScrapeError::fatal("Malformed extraction warnings"));
+            return Err(ScrapeError::page("Malformed extraction warnings"));
         };
         for warning in warnings {
             let code_ok = warning
@@ -545,7 +594,7 @@ fn validate_extraction(result: &mut Value, request: &PageRequest) -> Result<(), 
                 .and_then(Value::as_str)
                 .is_some_and(|message| message.len() <= 512);
             if !warning.is_object() || !code_ok || !message_ok {
-                return Err(ScrapeError::fatal("Malformed extraction warning"));
+                return Err(ScrapeError::page("Malformed extraction warning"));
             }
         }
     }
@@ -617,7 +666,7 @@ pub async fn run_scrape(
     wait_after_load(request, deadline, &connection.stop).await?;
     let mut result = extract(connection, request, &target.session, deadline).await?;
     validate_extraction(&mut result, request)?;
-    if let Some(status) = connection.http_status {
+    if let Some(status) = connection.page.http_status {
         apply_http_status(&mut result, status);
     }
     truncate_content(&mut result, request.max_chars);
@@ -668,9 +717,9 @@ mod tests {
         };
         connection.observe(&event("main", json!(201.5)));
         connection.observe(&event("child", json!(503)));
-        assert!(connection.http_status.is_none());
+        assert!(connection.page.http_status.is_none());
         assert_eq!(
-            connection.early_document_statuses,
+            connection.page.early_document_statuses,
             [("child".to_string(), 503)]
         );
         // Fractional statuses never become statusCode; integers under 100 or
@@ -678,13 +727,37 @@ mod tests {
         connection.observe(&event("main", json!(99)));
         connection.observe(&event("main", json!(600)));
         connection.observe(&event("main", json!(201)));
-        assert!(connection.http_status.is_none());
-        connection.main_frame = "child".to_string();
+        assert!(connection.page.http_status.is_none());
+        connection.page.main_frame = "child".to_string();
         connection.observe(&event("child", json!(404)));
-        assert_eq!(connection.http_status, Some(404));
+        assert_eq!(connection.page.http_status, Some(404));
         // Subframe responses never overwrite the document.
         connection.observe(&event("main", json!(500)));
-        assert_eq!(connection.http_status, Some(404));
+        assert_eq!(connection.page.http_status, Some(404));
+        // Obscura reports iframe documents with the page's frame id; the
+        // navigation loader's request id is what separates them.
+        let subframe = json!({
+            "method": "Network.responseReceived",
+            "sessionId": "session",
+            "params": {
+                "type": "Document", "frameId": "child",
+                "requestId": "fetch-1", "loaderId": "loader-1",
+                "response": {"status": 503},
+            },
+        });
+        connection.observe(&subframe);
+        assert_eq!(connection.page.http_status, Some(404));
+        let document = json!({
+            "method": "Network.responseReceived",
+            "sessionId": "session",
+            "params": {
+                "type": "Document", "frameId": "child",
+                "requestId": "loader-1", "loaderId": "loader-1",
+                "response": {"status": 200},
+            },
+        });
+        connection.observe(&document);
+        assert_eq!(connection.page.http_status, Some(200));
     }
 
     #[test]
@@ -762,7 +835,7 @@ mod tests {
         });
         connection.observe(&load);
         assert!(
-            !connection.page_loaded,
+            !connection.page.loaded,
             "about:blank load before navigate must not finish the wait"
         );
         connection.observe(&json!({
@@ -770,41 +843,80 @@ mod tests {
             "sessionId": "session",
             "params": {"name": "load", "frameId": "main"},
         }));
-        assert!(!connection.page_loaded);
-        connection.main_frame = "main".to_string();
+        assert!(!connection.page.loaded);
+        connection.page.main_frame = "main".to_string();
         connection.observe(&json!({
             "method": "Page.lifecycleEvent",
             "sessionId": "session",
             "params": {"name": "load", "frameId": "child"},
         }));
-        assert!(!connection.page_loaded);
+        assert!(!connection.page.loaded);
         connection.observe(&json!({
             "method": "Page.lifecycleEvent",
             "sessionId": "session",
             "params": {"name": "load", "frameId": "main"},
         }));
-        assert!(connection.page_loaded);
-        connection.page_loaded = false;
+        assert!(connection.page.loaded);
+        connection.page.loaded = false;
         connection.observe(&load);
-        assert!(connection.page_loaded);
+        assert!(connection.page.loaded);
     }
 
     #[test]
-    fn only_a_dead_cdp_connection_reaps_the_browser() {
-        let reap = |message: &str| ScrapeError::Fatal(message.to_string()).reaps_browser();
-        assert!(reap(DISCONNECTED));
-        assert!(reap("Cannot write Lightpanda CDP command"));
-        assert!(reap("Lightpanda exited before opening its Unix socket"));
-        assert!(reap("Malformed CDP response envelope"));
-        assert!(reap("Invalid CDP JSON: recursion limit exceeded"));
-        assert!(reap("CDP response must be an object"));
-        assert!(reap("CDP result must be an object"));
-        assert!(!reap("Content readiness timed out"));
-        assert!(!reap("waitFor exceeds remaining operation timeout"));
-        assert!(!reap(TIMED_OUT));
-        assert!(!reap(STOPPING));
-        assert!(!reap(STOPPED));
-        assert!(!reap(TOO_LARGE));
+    fn loads_before_the_navigate_reply_apply_to_the_document_frame() {
+        let mut connection = Connection::new(Stop::channel());
+        connection.active_session = "session".to_string();
+        for frame in ["child", "main"] {
+            connection.observe(&json!({
+                "method": "Page.lifecycleEvent",
+                "sessionId": "session",
+                "params": {"name": "load", "frameId": frame},
+            }));
+        }
+        // Obscura's bare load event cannot be attributed to a frame.
+        connection.observe(&json!({
+            "method": "Page.loadEventFired",
+            "sessionId": "session",
+        }));
+        assert!(!connection.page.loaded, "no frame id is known yet");
+        assert_eq!(connection.page.early_loads, ["child", "main"]);
+        connection.page.main_frame = "main".to_string();
+        let early = connection
+            .page
+            .early_loads
+            .iter()
+            .any(|frame| frame == &connection.page.main_frame);
+        connection.page.early_loads.clear();
+        assert!(early, "the document frame's early load must be applied");
+        assert!(
+            !connection.page.loaded,
+            "the parser applies the flag; observe only buffers"
+        );
+    }
+
+    #[test]
+    fn only_a_transport_failure_reaps_the_browser() {
+        assert!(ScrapeError::Transport(DISCONNECTED.to_string()).reaps_browser());
+        assert!(ScrapeError::Transport("Cannot write CDP command".to_string()).reaps_browser());
+        assert!(
+            ScrapeError::Transport("Malformed CDP response envelope".to_string()).reaps_browser()
+        );
+        assert!(
+            ScrapeError::Transport("Invalid CDP JSON: recursion limit exceeded".to_string())
+                .reaps_browser()
+        );
+        assert!(
+            ScrapeError::Transport("CDP response must be an object".to_string()).reaps_browser()
+        );
+        assert!(!ScrapeError::Page("Content readiness timed out".to_string()).reaps_browser());
+        assert!(
+            !ScrapeError::Page("waitFor exceeds remaining operation timeout".to_string())
+                .reaps_browser()
+        );
+        assert!(!ScrapeError::Page(TIMED_OUT.to_string()).reaps_browser());
+        assert!(!ScrapeError::Page(STOPPING.to_string()).reaps_browser());
+        assert!(!ScrapeError::Page(STOPPED.to_string()).reaps_browser());
+        assert!(!ScrapeError::Page(TOO_LARGE.to_string()).reaps_browser());
         assert!(!ScrapeError::Cdp("Runtime.evaluate: broken".to_string()).reaps_browser());
     }
 }

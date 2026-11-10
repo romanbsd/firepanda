@@ -1,4 +1,4 @@
-"""Repeat native browsing and failure recovery under sanitizers or macOS leaks."""
+"""Repeat native browsing (Lightpanda or Obscura) and failure recovery under sanitizers or macOS leaks."""
 import argparse
 import http.server
 import os
@@ -9,11 +9,12 @@ import tempfile
 import threading
 
 from fixtures import Fixture
-from harness import Service, structured
+from harness import Service, browser_command, structured
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("binary")
-parser.add_argument("lightpanda")
+parser.add_argument("browser")
+parser.add_argument("--backend", default="lightpanda")
 parser.add_argument("--iterations", type=int, default=100)
 parser.add_argument("--leaks", action="store_true")
 parser.add_argument("--report", type=Path)
@@ -21,7 +22,7 @@ args = parser.parse_args()
 server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Fixture)
 threading.Thread(target=server.serve_forever, daemon=True).start()
 base = "http://127.0.0.1:" + str(server.server_port)
-command = [args.binary, "--lightpanda", args.lightpanda]
+command = browser_command(args.binary, args.backend, args.browser)
 env = os.environ.copy()
 if args.leaks:
     command = ["/usr/bin/leaks", "--atExit", "--"] + command

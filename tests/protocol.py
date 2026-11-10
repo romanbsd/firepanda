@@ -191,5 +191,51 @@ class Protocol(unittest.TestCase):
         self.assertEqual([r["id"] for r in out], list(range(100)))
 
 
+    def test_backend_selection_and_engine_flags(self):
+        # Every invalid combination must exit 2 before starting the service.
+        invalid = [
+            ["--backend", "chrome"],
+            ["--backend", "obscura", "--lightpanda", "/x/lightpanda"],
+            ["--browser", "/x", "--lightpanda", "/x"],
+            ["--socket", "/tmp/cdp.sock", "--cdp-url", "ws://127.0.0.1:1/devtools/browser"],
+            ["--cdp-url", "ws://127.0.0.1:1/devtools/browser", "--browser", "/x"],
+            ["--cdp-url", "http://127.0.0.1:1/devtools/browser"],
+            ["--socket", "relative.sock"],
+            ["--backend", "lightpanda", "--stealth"],
+            ["--backend", "lightpanda", "--obey-robots"],
+            ["--backend", "lightpanda", "--no-private-network"],
+            ["--backend", "obscura", "--cdp-url", "ws://127.0.0.1:1/devtools/browser", "--stealth"],
+        ]
+        for args in invalid:
+            result = subprocess.run([BINARY, *args], capture_output=True, text=True, timeout=5)
+            self.assertEqual(result.returncode, 2, (args, result.stderr))
+        valid = [
+            ["--backend", "obscura"],
+            ["--backend", "obscura", "--stealth"],
+            ["--backend", "obscura", "--no-private-network"],
+            ["--backend", "auto", "--browser", "/opt/obscura"],
+            ["--cdp-url", "ws://127.0.0.1:1/devtools/browser"],
+        ]
+        for args in valid:
+            result = subprocess.run([BINARY, *args], input="", capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, (args, result.stderr))
+
+    def test_obscura_spawn_failure_names_obscura(self):
+        out = run_batch(
+            [BINARY, "--backend", "obscura", "--browser", "/missing/obscura"],
+            [message(1, "tools/call", _meta=META, name="scrape", arguments={"url": "https://example.com", "timeout": 500})],
+        )
+        self.assertTrue(out[0]["result"]["isError"])
+        self.assertIn("Cannot start Obscura", out[0]["result"]["content"][0]["text"])
+
+    def test_external_cdp_url_connection_failure(self):
+        out = run_batch(
+            [BINARY, "--cdp-url", "ws://127.0.0.1:9/devtools/browser"],
+            [message(1, "tools/call", _meta=META, name="scrape", arguments={"url": "https://example.com", "timeout": 500})],
+        )
+        self.assertTrue(out[0]["result"]["isError"])
+        self.assertIn("Cannot connect to", out[0]["result"]["content"][0]["text"])
+
+
 if __name__ == "__main__":
     unittest.main()

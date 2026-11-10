@@ -1,13 +1,15 @@
 # Firepanda
 
 A small Rust [MCP](https://modelcontextprotocol.io/) service for scraping,
-crawling, discovering links, and searching the web with native
-[Lightpanda](https://lightpanda.io/). Runs locally on macOS and Linux, without
-Docker, Node, Chromium, or libcurl.
+crawling, discovering links, and searching the web with a native headless
+browser: [Lightpanda](https://lightpanda.io/) or
+[Obscura](https://github.com/h4ckf0r0day/obscura). Runs locally on macOS and
+Linux, without Docker, Node, Chromium, or libcurl.
 
-Firepanda exposes five tools over stdio: three drive Lightpanda, one fetches raw
-resources directly over HTTP, and one searches the web. Lightpanda starts lazily,
-is reused across requests, and stops after 60 seconds of inactivity.
+Firepanda exposes five tools over stdio: three drive the selected browser, one
+fetches raw resources directly over HTTP, and one searches the web. The browser
+starts lazily, is reused across requests, and stops after 60 seconds of
+inactivity.
 
 - **fetch**: raw HTTP for JSON, Markdown, XML, text, images, and other simple
   resources, without starting the browser.
@@ -19,25 +21,27 @@ is reused across requests, and stops after 60 seconds of inactivity.
 
 This is a focused scraping service. It does not provide screenshots, LLM
 extraction, or full Firecrawl API compatibility. Websites requiring browser APIs
-Lightpanda does not implement may need a full browser instead.
+the selected engine does not implement may need a full browser instead.
 
 ## Build and run
 
-Requirements: Rust 1.85+ (edition 2024), Git, and native Lightpanda. Python 3.11+
-is needed for the installer, tests, and benchmarks, but not to run the compiled
-service. macOS and Linux are supported; Windows is not.
+Requirements: Rust 1.85+ (edition 2024), Git, and a native Lightpanda or Obscura
+binary. Python 3.11+ is needed for the installers, tests, and benchmarks, but not
+to run the compiled service. macOS and Linux are supported; Windows is not.
 
 From a checkout of this repository:
 
 ```sh
 python3 scripts/install-lightpanda.py --release 1.0.2
+# or: python3 scripts/install-obscura.py --release v0.2.6
 cargo build --release
 ./target/release/firepanda --lightpanda "$PWD/.local/bin/lightpanda"
+# or: ./target/release/firepanda --backend obscura --browser "$PWD/.local/bin/obscura"
 ```
 
 `make build` and `make release` both produce the five-tool binary. `make gates`
-runs every black-box suite: protocol, transport, fetch, search, native
-integration, and memory stress.
+runs every black-box suite against Lightpanda, `make gates-obscura` runs the
+browser suites against Obscura, and `make gates-all` runs both.
 
 ### Release build
 
@@ -60,6 +64,43 @@ upstream asset's SHA-256 digest, and writes a manifest beside the binary as
 mutable `nightly` tag; the command above explicitly uses the tested stable release.
 You can also supply an existing Lightpanda binary with `--lightpanda`.
 
+`scripts/install-obscura.py` follows the same rules: it downloads the platform
+archive defaulting to the latest release, verifies the archive SHA-256, installs
+`obscura` and `obscura-worker` side by side, and writes `obscura.json`. Select a
+tested tag with `--release v0.2.6`; `--stealth` and `--no-render` choose the
+matching release variant.
+
+### Browser backends
+
+```sh
+firepanda [--backend lightpanda|obscura|auto]
+          [--browser /path/to/browser]
+          [--lightpanda /path/to/lightpanda | --socket /absolute/cdp.sock]
+          [--cdp-url ws://host:port/devtools/browser]
+          [--idle-timeout SECONDS]
+          [--stealth] [--obey-robots] [--no-private-network]
+```
+
+- The default is Lightpanda; `--lightpanda PATH` is kept as an alias for
+  `--backend lightpanda --browser PATH`.
+- `--backend obscura` launches `obscura serve` on an ephemeral loopback port,
+  guarded by a per-process bearer token and a private ready file. Obscura blocks
+  private addresses by default; firepanda enables `--allow-private-network` to
+  match Lightpanda, and `--no-private-network` opts back into the guard.
+- `--stealth` and `--obey-robots` are Obscura-only and rejected for Lightpanda.
+- `--socket` attaches to an external Lightpanda Unix socket. `--cdp-url` attaches
+  to any external CDP WebSocket endpoint (for example an `obscura serve` you
+  manage yourself) and never spawns or kills it.
+- `auto` picks an explicitly named `--browser` executable by name, then a
+  `lightpanda` or `obscura` on `PATH`. It is opt-in because engines differ in DOM
+  coverage and extraction results.
+
+Both engines receive the same CDP pipeline: a fresh browser context per page,
+`Page.navigate` plus load lifecycle, and one in-page extraction round trip.
+Obscura delivers navigation events before the `Page.navigate` reply, so firepanda
+buffers an early document `load` and applies it once the frame id is known. See
+[browser backends](docs/browser-backends.md) for the evaluation and design.
+
 To install Firepanda under a user-owned prefix:
 
 ```sh
@@ -67,9 +108,9 @@ make install PREFIX="$HOME/.local"
 "$HOME/.local/bin/firepanda" --version
 ```
 
-Release archives contain the binary, documentation, and license. Lightpanda is
-installed separately. After extracting an archive and entering its directory, use
-the included installer and prebuilt executable:
+Release archives contain the binary, documentation, and license. Lightpanda or
+Obscura is installed separately. After extracting an archive and entering its
+directory, use the included installer and prebuilt executable:
 
 ```sh
 python3 scripts/install-lightpanda.py --release 1.0.2
@@ -261,7 +302,8 @@ stayed 429 after 15 s and 60 s). `auto` then falls back to the next engine.
 ## Browser lifecycle and design
 
 ```text
-MCP client ── stdin/stdout ── Firepanda ── CDP WebSocket / Unix socket ── Lightpanda
+MCP client ── stdin/stdout ── Firepanda ── CDP WebSocket ── Lightpanda (Unix socket)
+                                                       └──── Obscura (loopback TCP + bearer)
 ```
 
 - One serialized request stream, one reusable browser connection pool, and a fresh
@@ -270,8 +312,11 @@ MCP client ── stdin/stdout ── Firepanda ── CDP WebSocket / Unix sock
   reads JSON, Markdown, XML, text, images, and other files under the tool deadline
   and a 4 MiB body cap. HTTP/2 is used when TLS negotiates it (HTTP/1.1 fallback),
   and pooled connections are reused. HTML is rejected and routed to `scrape`.
-- A managed browser uses a private temporary directory (0700) and socket (0600).
-  No TCP discovery endpoint, local proxy, or heartbeat thread is needed.
+- A managed Lightpanda uses a private temporary directory (0700) and socket (0600),
+  with no TCP discovery endpoint. A managed Obscura uses the same private directory
+  for its ready file (0600), binds loopback on an ephemeral port, and requires the
+  per-process bearer token on every control request. Neither needs a local proxy
+  or a heartbeat thread.
 - Extraction runs in the page and returns only requested formats. Link-only and
   raw-HTML-only calls skip DOM cloning. Text-readiness scans are cached until DOM
   mutations invalidate them; selector state is still polled.
@@ -299,10 +344,16 @@ lightpanda serve --unix-socket /tmp/my-lightpanda/cdp.sock
 ./target/release/firepanda --socket /tmp/my-lightpanda/cdp.sock
 ```
 
+```sh
+obscura serve --host 127.0.0.1 --port 9222 --allow-private-network
+# In another terminal:
+./target/release/firepanda --cdp-url ws://127.0.0.1:9222/devtools/browser
+```
+
 The socket path must be absolute and at most 100 bytes. Firepanda closes its own
 connection on failure/shutdown but never kills an external browser or removes its
-socket. SIGKILL cannot run cleanup. Calls are serialized, and cancellation
-notifications do not interrupt an in-flight tool call.
+socket/ready file. SIGKILL cannot run cleanup. Calls are serialized, and
+cancellation notifications do not interrupt an in-flight tool call.
 
 See [design details](docs/native-design.md) for code structure and protocol behavior.
 
@@ -330,8 +381,8 @@ The Markdown renderer handles common article elements rather than all HTML seman
 
 ## Benchmarks
 
-Measurements are local synthetic workloads, not comparisons with Firecrawl,
-Chromium, or TCP transport. They do not predict public-site throughput.
+Measurements are local synthetic workloads, not comparisons with Firecrawl or
+Chromium. They do not predict public-site throughput.
 
 Five-iteration warm medians from `scripts/benchmark.py` on macOS arm64 with stable
 Lightpanda 1.0.2 and local HTTP fixtures:
@@ -362,6 +413,41 @@ python3 scripts/benchmark.py --binary target/release/firepanda \
 The Python benchmark uses local HTTP fixtures, reports cold launch separately,
 and measures warm small pages, 256 KiB content, 3000-paragraph articles, 10000 links,
 and delayed JavaScript content. See [methodology and retained data](docs/benchmarks.md).
+
+### Lightpanda vs Obscura
+
+Same local fixtures, 30 single-page and 5 crawl/map samples per backend, macOS
+arm64 (Apple M5 Pro, 15 CPUs, load average 4.75), Firepanda 0.2.0,
+Lightpanda 1.1.0-nightly.11647, Obscura 0.2.6:
+
+| Workload | Lightpanda | Obscura | Ratio |
+| --- | ---: | ---: | ---: |
+| Cold launch + first scrape | 64.6 ms | 64.6 ms | 1.00× |
+| Static scrape | 2.3 ms | 4.0 ms | 1.74× |
+| 3000-paragraph article | 28.3 ms | 42.5 ms | 1.50× |
+| Delayed JavaScript text | 311.1 ms | 319.1 ms | 1.03× |
+| Crawl 21 pages, `maxConcurrency=4` | 78.1 ms | 146.0 ms | 1.87× |
+| Map 10000 links | 99.4 ms | 172.3 ms | 1.73× |
+| Map sitemap, 50 URLs | 2.0 ms | 4.1 ms | 2.05× |
+| Idle RSS after first scrape | 37.7 MB | 36.0 MB | — |
+| RSS after 50 article scrapes | 94.1 MB | 334.1 MB | 3.6× |
+
+`fetch` and `search` do not use the browser; both measured within noise of each
+other. Search timings use local engine fixtures because the public engines
+rate-limited the run; that probe is recorded but not used for comparison.
+Response payloads were identical on both engines.
+
+Obscura costs roughly 1.5–2× CPU and wall time on rendered pages and 2–3.6×
+resident memory during sustained crawls, at equal cold start and idle cost. This
+is why Lightpanda remains the default. Reproduce with:
+
+```sh
+make bench
+# or: python3 scripts/benchmark-backends.py --binary target/release/firepanda \
+#       --lightpanda .local/bin/lightpanda --obscura .local/bin/obscura
+```
+
+See [full metrics and method](docs/benchmarks.md#lightpanda-vs-obscura-2026-11-10).
 
 ## Development and validation
 

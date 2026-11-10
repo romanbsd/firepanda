@@ -1,20 +1,29 @@
-//! Browser handle: managed Lightpanda child, CDP connection pool, idle
-//! shutdown. Process state stays behind one async mutex; free connections are
-//! shared with page workers.
+//! Browser handle: managed browser child (Lightpanda or Obscura), CDP
+//! connection pool, idle shutdown. Process state stays behind one async mutex;
+//! free connections are shared with page workers.
 
 mod cdp;
 
 use cdp::Connection;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::io::Read;
 use std::os::fd::AsFd;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::{TcpStream, UnixStream};
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, watch};
 
-/// A connected CDP WebSocket over the Unix socket.
-type CdpStream = tokio_tungstenite::WebSocketStream<tokio::net::UnixStream>;
+/// Either end of a CDP WebSocket: a Unix socket (Lightpanda) or loopback TCP
+/// (Obscura, external endpoints).
+pub trait AsyncReadWrite: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> AsyncReadWrite for T {}
+
+/// A connected CDP WebSocket. Boxing the stream keeps the CDP client independent
+/// of the transport; one allocation per connection is noise next to a browser.
+pub type CdpStream = tokio_tungstenite::WebSocketStream<Box<dyn AsyncReadWrite>>;
 
 /// Reconnect window for a managed browser that is still coming up; bounded by
 /// the scrape's own deadline as well.
@@ -26,20 +35,79 @@ const CONNECT_RETRY: Duration = Duration::from_millis(20);
 
 const STOPPING: &str = "Service is stopping";
 
+/// Maximum page budget accepted by the tools (`timeout` in `src/tools.rs`).
+/// Obscura caps in-page script execution per process, so raise that cap to the
+/// largest page budget instead of silently truncating extraction.
+pub const MAX_PAGE_TIMEOUT_MS: i64 = 120_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Backend {
+    Lightpanda,
+    Obscura,
+}
+
+impl Backend {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "lightpanda" => Some(Self::Lightpanda),
+            "obscura" => Some(Self::Obscura),
+            _ => None,
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Lightpanda => "Lightpanda",
+            Self::Obscura => "Obscura",
+        }
+    }
+
+    pub const fn default_program(self) -> &'static str {
+        match self {
+            Self::Lightpanda => "lightpanda",
+            Self::Obscura => "obscura",
+        }
+    }
+}
+
+/// Where the CDP client connects. Lightpanda exposes a plain WebSocket over a
+/// private Unix socket; Obscura only listens on loopback TCP and guards the
+/// control plane with a bearer token.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Endpoint {
+    Unix { path: String },
+    Tcp { url: String, token: Option<String> },
+}
+
 #[derive(Debug, Clone)]
 pub struct Options {
-    pub lightpanda: String,
+    pub backend: Backend,
+    /// Browser executable; `--browser` or the backend-specific alias.
+    pub program: String,
+    /// External Lightpanda Unix socket; empty for a managed browser.
     pub socket: String,
+    /// External CDP WebSocket URL; empty for a managed browser.
+    pub cdp_url: String,
     /// Zero keeps the managed browser warm indefinitely.
     pub idle_timeout: Duration,
+    pub stealth: bool,
+    pub obey_robots: bool,
+    /// Obscura blocks loopback/RFC1918/link-local by default. Firepanda keeps
+    /// Lightpanda's behaviour (local sites are scrapeable) unless disabled.
+    pub allow_private_network: bool,
 }
 
 impl Default for Options {
     fn default() -> Self {
         Self {
-            lightpanda: "lightpanda".to_string(),
+            backend: Backend::Lightpanda,
+            program: Backend::Lightpanda.default_program().to_string(),
             socket: String::new(),
+            cdp_url: String::new(),
             idle_timeout: Duration::from_secs(60),
+            stealth: false,
+            obey_robots: false,
+            allow_private_network: true,
         }
     }
 }
@@ -135,12 +203,15 @@ impl Stop {
     }
 }
 
-/// Child process, socket directory, and idle bookkeeping, behind one async
-/// mutex so concurrent crawl checkouts never race a launch or connect.
+/// Child process, endpoint, and idle bookkeeping, behind one async mutex so
+/// concurrent crawl checkouts never race a launch or connect.
 struct Process {
     options: Options,
     directory: String,
     child: Option<Child>,
+    endpoint: Option<Endpoint>,
+    /// Obscura control-plane bearer token; None for Lightpanda.
+    token: Option<String>,
     idle_since: Option<Instant>,
 }
 
@@ -149,7 +220,8 @@ struct Inner {
     /// Idle connections between page fetches; returned through `give_back`.
     free: Mutex<Vec<Connection>>,
     stop: Stop,
-    /// False for `--socket`: an external peer is never spawned or killed.
+    /// False for `--socket`/`--cdp-url`: an external peer is never spawned or
+    /// killed.
     owns_process: bool,
 }
 
@@ -173,13 +245,27 @@ pub enum PageTask {
 
 impl Browser {
     pub fn new(options: Options, stop: Stop) -> Self {
-        let owns_process = options.socket.is_empty();
+        let owns_process = options.socket.is_empty() && options.cdp_url.is_empty();
+        let endpoint = if !options.cdp_url.is_empty() {
+            Some(Endpoint::Tcp {
+                url: options.cdp_url.clone(),
+                token: None,
+            })
+        } else if !options.socket.is_empty() {
+            Some(Endpoint::Unix {
+                path: options.socket.clone(),
+            })
+        } else {
+            None
+        };
         Self {
             inner: Arc::new(Inner {
                 process: Mutex::new(Process {
                     options,
                     directory: String::new(),
                     child: None,
+                    endpoint,
+                    token: None,
                     idle_since: None,
                 }),
                 free: Mutex::new(Vec::new()),
@@ -330,13 +416,16 @@ impl Browser {
         if owns_process {
             launch(&mut process)?;
         }
-        let socket = process.options.socket.clone();
         loop {
             if self.inner.stop.stopped() {
                 return Err(STOPPING.to_string());
             }
-            // Host header stays localhost; only the connection target is a UDS.
-            if let Ok(websocket) = attempt(&socket).await {
+            // Obscura publishes its bound port in a ready file after V8 starts;
+            // Lightpanda's endpoint exists as soon as it is spawned.
+            resolve_endpoint(&mut process);
+            if let Some(endpoint) = process.endpoint.clone()
+                && let Ok(websocket) = attempt(&endpoint).await
+            {
                 connection.attach(websocket);
                 return Ok(());
             }
@@ -349,7 +438,10 @@ impl Browser {
                 .is_none_or(|child| !matches!(child.try_wait(), Ok(None)));
             if gone {
                 process.child = None;
-                return Err("Lightpanda exited before opening its Unix socket".to_string());
+                return Err(format!(
+                    "{} exited before becoming ready",
+                    process.options.backend.label()
+                ));
             }
             if Instant::now() >= deadline {
                 break;
@@ -359,15 +451,13 @@ impl Browser {
                 () = tokio::time::sleep(CONNECT_RETRY) => {}
             }
         }
-        Err(format!(
-            "Cannot connect to Lightpanda Unix socket: {socket}"
-        ))
+        Err(connect_error(&process))
     }
 
     /// Drop pooled connections, stop an owned child, and remove the private
-    /// socket directory. External `--socket` mode keeps its socket path: only
-    /// the pool is cleared. Called after failures, on idle expiry, and when
-    /// the service exits.
+    /// endpoint directory. External `--socket`/`--cdp-url` mode keeps its
+    /// endpoint: only the pool is cleared. Called after failures, on idle
+    /// expiry, and when the service exits.
     pub async fn shutdown(&self) {
         self.inner.free.lock().await.clear();
         let mut process = self.inner.process.lock().await;
@@ -376,7 +466,8 @@ impl Browser {
         if !process.directory.is_empty() {
             let _ = std::fs::remove_dir_all(&process.directory);
             process.directory.clear();
-            process.options.socket.clear();
+            process.endpoint = None;
+            process.token = None;
         }
     }
 
@@ -423,23 +514,41 @@ impl Drop for Browser {
 /// peer from growing memory.
 const MAX_WS_MESSAGE: usize = 16 * 1024 * 1024;
 
-/// One connect+handshake attempt against the CDP Unix socket, capped at the
+/// One connect+handshake attempt against the CDP endpoint, capped at the
 /// `CONNECT_ATTEMPT` so a stalled peer cannot outlive the loop.
-async fn attempt(socket: &str) -> Result<CdpStream, ()> {
+async fn attempt(endpoint: &Endpoint) -> Result<CdpStream, ()> {
     let connect = async {
-        let stream = tokio::net::UnixStream::connect(socket)
-            .await
-            .map_err(|_| ())?;
-        // Handshake over our own stream; the Host header stays localhost.
-        // Lightpanda exposes a plain WebSocket,
-        // so this is HTTP/1.1 Upgrade over the UDS (HTTP/2 extended CONNECT
-        // is not used).
+        let (stream, url, token): (Box<dyn AsyncReadWrite>, &str, Option<&str>) = match endpoint {
+            Endpoint::Unix { path } => {
+                let stream = UnixStream::connect(path).await.map_err(|_| ())?;
+                // Lightpanda exposes a plain WebSocket at `/`; the Host header
+                // stays localhost because this is HTTP/1.1 Upgrade over a UDS.
+                (Box::new(stream), "ws://localhost/", None)
+            }
+            Endpoint::Tcp { url, token } => {
+                let parsed = url::Url::parse(url).map_err(|_| ())?;
+                let host = parsed.host_str().ok_or(())?;
+                let port = parsed.port_or_known_default().ok_or(())?;
+                let stream = TcpStream::connect((host, port)).await.map_err(|_| ())?;
+                (Box::new(stream), url.as_str(), token.as_deref())
+            }
+        };
         let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
             .max_message_size(Some(MAX_WS_MESSAGE))
             .max_frame_size(Some(MAX_WS_MESSAGE))
             .max_write_buffer_size(MAX_WS_MESSAGE);
+        let mut request =
+            tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(url)
+                .map_err(|_| ())?;
+        if let Some(token) = token {
+            let value = tokio_tungstenite::tungstenite::http::HeaderValue::from_str(&format!(
+                "Bearer {token}"
+            ))
+            .map_err(|_| ())?;
+            request.headers_mut().insert("authorization", value);
+        }
         let (websocket, _) =
-            tokio_tungstenite::client_async_with_config("ws://localhost/", stream, Some(config))
+            tokio_tungstenite::client_async_with_config(request, stream, Some(config))
                 .await
                 .map_err(|_| ())?;
         Ok(websocket)
@@ -450,13 +559,94 @@ async fn attempt(socket: &str) -> Result<CdpStream, ()> {
 }
 
 /// One spawn-failure message for both stdout-clone and `spawn` failures.
-fn start_error(error: &std::io::Error) -> String {
-    format!("Cannot start Lightpanda: {error}; use --lightpanda /path/to/lightpanda")
+fn start_error(process: &Process, error: &std::io::Error) -> String {
+    format!(
+        "Cannot start {}: {error}; use --browser /path/to/{}",
+        process.options.backend.label(),
+        process.options.backend.default_program()
+    )
 }
 
-/// Spawn the managed browser: `lightpanda serve --unix-socket … --log-level
-/// error`, stdin /dev/null, stdout redirected to stderr so a browser log can
-/// never corrupt the MCP byte stream.
+/// What the managed browser must do before the pool can connect.
+fn connect_error(process: &Process) -> String {
+    match &process.endpoint {
+        Some(Endpoint::Unix { path }) => format!(
+            "Cannot connect to {} Unix socket: {path}",
+            process.options.backend.label()
+        ),
+        Some(Endpoint::Tcp { url, .. }) => format!(
+            "Cannot connect to {} CDP endpoint: {url}",
+            process.options.backend.label()
+        ),
+        None => format!(
+            "{} did not publish a ready file",
+            process.options.backend.label()
+        ),
+    }
+}
+
+/// Read and parse a small JSON record from the private directory.
+fn read_json<T: serde::de::DeserializeOwned>(path: &std::path::Path) -> Option<T> {
+    serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+}
+
+/// Read Obscura's atomically published `{pid, host, port, websocket_path}`.
+fn read_ready(path: &std::path::Path) -> Option<ReadyRecord> {
+    let ready: ReadyRecord = read_json(path)?;
+    let host_ok = matches!(ready.host.as_str(), "127.0.0.1" | "::1" | "localhost");
+    let path_ok = ready.websocket_path.starts_with('/') && ready.websocket_path.len() <= 256;
+    (ready.port != 0 && host_ok && path_ok).then_some(ready)
+}
+
+/// `host:port`, bracketed for IPv6 literals.
+fn authority(host: &str, port: u16) -> String {
+    if host.contains(':') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
+/// Resolve a managed Obscura endpoint once its ready file appears. The record
+/// must name the child this process spawned, so a stale file cannot redirect
+/// the pool.
+fn resolve_endpoint(process: &mut Process) {
+    if process.endpoint.is_some() {
+        return;
+    }
+    let path = std::path::Path::new(&process.directory).join(READY_FILE);
+    let Some(ready) = read_ready(&path) else {
+        return;
+    };
+    if process.child.as_ref().and_then(Child::id) != Some(ready.pid) {
+        return;
+    }
+    let url = format!("ws://{}", ready.url());
+    process.endpoint = Some(Endpoint::Tcp {
+        url,
+        token: process.token.clone(),
+    });
+}
+
+/// 32 random bytes, hex encoded. `OBSCURA_CDP_TOKEN` requires at least 32.
+fn random_token() -> Result<String, String> {
+    use std::fmt::Write as _;
+
+    let mut bytes = [0u8; 32];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut file| file.read_exact(&mut bytes))
+        .map_err(|_| "Cannot generate an Obscura CDP token".to_string())?;
+    let mut token = String::with_capacity(64);
+    for byte in bytes {
+        let _ = write!(token, "{byte:02x}");
+    }
+    Ok(token)
+}
+
+/// Spawn the managed browser and publish its endpoint. Lightpanda gets a
+/// private Unix socket; Obscura gets an ephemeral loopback port, a bearer
+/// token, and a ready file. stdin /dev/null and stdout redirected to stderr so
+/// a browser log can never corrupt the MCP byte stream.
 fn launch(process: &mut Process) -> Result<(), String> {
     let running = process
         .child
@@ -466,47 +656,133 @@ fn launch(process: &mut Process) -> Result<(), String> {
         return Ok(()); // Still running; reuse it.
     }
     process.child = None;
+    process.endpoint = None;
+    process.token = None;
     if process.directory.is_empty() {
         sweep_orphans(std::path::Path::new(SOCKET_ROOT));
-        let directory = make_socket_directory()?;
-        process.options.socket = format!("{directory}/cdp.sock");
-        process.directory = directory;
+        process.directory = make_socket_directory()?;
     }
-    let socket = process.options.socket.clone();
-    let _ = std::fs::remove_file(&socket); // A stale socket would fail the bind.
     let stdout = std::io::stderr()
         .as_fd()
         .try_clone_to_owned()
-        .map_err(|error| start_error(&error))?;
-    let child = Command::new(&process.options.lightpanda)
-        .arg("serve")
-        .arg("--unix-socket")
-        .arg(&socket)
-        .arg("--log-level")
-        .arg("error")
+        .map_err(|error| start_error(process, &error))?;
+    let mut command = Command::new(&process.options.program);
+    command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::from(stdout))
         .stderr(std::process::Stdio::inherit())
-        .kill_on_drop(false)
+        .kill_on_drop(false);
+    match process.options.backend {
+        Backend::Lightpanda => {
+            let socket = format!("{}/{SOCKET_FILE}", process.directory);
+            let _ = std::fs::remove_file(&socket); // A stale socket would fail the bind.
+            command
+                .arg("serve")
+                .arg("--unix-socket")
+                .arg(&socket)
+                .arg("--log-level")
+                .arg("error");
+            process.endpoint = Some(Endpoint::Unix { path: socket });
+        }
+        Backend::Obscura => {
+            let ready = format!("{}/{READY_FILE}", process.directory);
+            let _ = std::fs::remove_file(&ready);
+            let token = random_token()?;
+            command
+                .arg("serve")
+                .arg("--host")
+                .arg("127.0.0.1")
+                .arg("--port")
+                .arg("0")
+                .arg("--ready-file")
+                .arg(&ready)
+                .arg("--workers")
+                .arg("1");
+            if process.options.stealth {
+                command.arg("--stealth");
+            }
+            if process.options.obey_robots {
+                command.arg("--obey-robots");
+            }
+            if process.options.allow_private_network {
+                command.arg("--allow-private-network");
+            }
+            command.env("OBSCURA_CDP_TOKEN", &token).env(
+                "OBSCURA_SCRIPT_DEADLINE_MS",
+                MAX_PAGE_TIMEOUT_MS.to_string(),
+            );
+            process.token = Some(token);
+        }
+    }
+    let child = command
         .spawn()
-        .map_err(|error| start_error(&error))?;
-    // Record ownership so a later firepanda can reap this browser if we die
-    // without cleanup. Best effort: a missing file only skips that sweep.
+        .map_err(|error| start_error(process, &error))?;
     if let Some(pid) = child.id() {
-        let owner = format!("{} {pid}", std::process::id());
-        let _ = std::fs::write(format!("{}/{OWNER_FILE}", process.directory), owner);
+        write_owner(process, pid);
     }
     process.child = Some(child);
     Ok(())
 }
 
+/// Record ownership so a later firepanda can reap this browser if we die
+/// without cleanup. Best effort: a missing file only skips that sweep.
+fn write_owner(process: &Process, pid: u32) {
+    let backend = match process.options.backend {
+        Backend::Lightpanda => "lightpanda",
+        Backend::Obscura => "obscura",
+    };
+    let record = OwnerRecord {
+        parent: i32::try_from(std::process::id()).unwrap_or(i32::MAX),
+        browser: i32::try_from(pid).unwrap_or(i32::MAX),
+        backend: backend.to_string(),
+        token: process.token.clone(),
+    };
+    if let Ok(text) = serde_json::to_string(&record) {
+        let _ = std::fs::write(format!("{}/{OWNER_FILE}", process.directory), text);
+    }
+}
+
 const SOCKET_ROOT: &str = "/tmp";
-const OWNER_FILE: &str = "owner";
+const SOCKET_FILE: &str = "cdp.sock";
+const READY_FILE: &str = "cdp.json";
+const OWNER_FILE: &str = "owner.json";
+
+#[derive(Debug, Deserialize)]
+struct ReadyRecord {
+    pid: u32,
+    host: String,
+    port: u16,
+    websocket_path: String,
+}
+
+impl ReadyRecord {
+    fn url(&self) -> String {
+        format!(
+            "{}{}",
+            authority(&self.host, self.port),
+            self.websocket_path
+        )
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct OwnerRecord {
+    parent: i32,
+    browser: i32,
+    backend: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    token: Option<String>,
+}
+
+fn read_owner(path: &std::path::Path) -> Option<OwnerRecord> {
+    read_json(path)
+}
 
 /// Reap browsers left by a firepanda that died without cleanup (SIGKILL,
-/// abort): each socket directory names its owner and browser PIDs. Only dead
-/// owners are swept, and the browser is signalled only while its socket still
-/// accepts connections, which proves that PID has not been reused.
+/// abort): each private directory names its owner, the browser PID, and the
+/// backend. Only dead owners are swept, and the browser is signalled only
+/// after proving the recorded endpoint is still live, which shows the PID has
+/// not been reused.
 /// ponytail: runs only when a browser launches; Linux `PR_SET_PDEATHSIG` would
 /// reap immediately but does not exist on macOS.
 fn sweep_orphans(root: &std::path::Path) {
@@ -522,25 +798,66 @@ fn sweep_orphans(root: &std::path::Path) {
             continue;
         }
         let path = entry.path();
-        let Ok(owner) = std::fs::read_to_string(path.join(OWNER_FILE)) else {
+        let Some(owner) = read_owner(&path.join(OWNER_FILE)) else {
             continue; // Not ours, still starting, or from an older version.
         };
-        let mut pids = owner
-            .split_whitespace()
-            .filter_map(|pid| pid.parse::<libc::pid_t>().ok());
-        let (Some(parent), Some(browser)) = (pids.next(), pids.next()) else {
-            continue;
-        };
-        if parent <= 0 || browser <= 0 || process_exists(parent) {
+        if owner.parent <= 0 || owner.browser <= 0 || process_exists(owner.parent) {
             continue;
         }
-        if std::os::unix::net::UnixStream::connect(path.join("cdp.sock")).is_ok() {
+        if browser_is_live(&path, &owner) {
             unsafe {
-                libc::kill(browser, libc::SIGTERM);
+                libc::kill(owner.browser, libc::SIGTERM);
             }
         }
         let _ = std::fs::remove_dir_all(&path);
     }
+}
+
+/// Prove the recorded browser still owns the recorded endpoint.
+fn browser_is_live(directory: &std::path::Path, owner: &OwnerRecord) -> bool {
+    match owner.backend.as_str() {
+        "lightpanda" => {
+            std::os::unix::net::UnixStream::connect(directory.join(SOCKET_FILE)).is_ok()
+        }
+        "obscura" => {
+            let Some(ready) = read_ready(&directory.join(READY_FILE)) else {
+                return false;
+            };
+            u32::try_from(owner.browser).is_ok_and(|pid| pid == ready.pid)
+                && probe_json_version(&ready.host, ready.port, owner.token.as_deref())
+        }
+        _ => false,
+    }
+}
+
+/// Authenticated `GET /json/version` against the recorded loopback port.
+fn probe_json_version(host: &str, port: u16, token: Option<&str>) -> bool {
+    use std::io::Write as _;
+    use std::net::{SocketAddr, TcpStream as StdTcpStream};
+
+    let authority = authority(host, port);
+    let Ok(address) = authority.parse::<SocketAddr>() else {
+        return false;
+    };
+    let Ok(mut stream) = StdTcpStream::connect_timeout(&address, Duration::from_millis(200)) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(200)));
+    let auth = token
+        .map(|token| format!("Authorization: Bearer {token}\r\n"))
+        .unwrap_or_default();
+    let request = format!(
+        "GET /json/version HTTP/1.1\r\nHost: {authority}\r\n{auth}Connection: close\r\n\r\n"
+    );
+    if stream.write_all(request.as_bytes()).is_err() {
+        return false;
+    }
+    let mut response = [0u8; 4096];
+    let Ok(read) = stream.read(&mut response) else {
+        return false;
+    };
+    String::from_utf8_lossy(&response[..read]).starts_with("HTTP/1.")
 }
 
 /// `kill(pid, 0)`: only ESRCH proves the process is gone (EPERM means it
@@ -609,13 +926,28 @@ mod tests {
         let dead = exited.id();
         exited.wait().unwrap();
         let live = std::process::id();
+        let record = |parent, browser| {
+            serde_json::to_string(&OwnerRecord {
+                parent,
+                browser,
+                backend: "lightpanda".to_string(),
+                token: None,
+            })
+            .unwrap()
+        };
         for (name, owner) in [
-            ("firepanda-dead", format!("{dead} {dead}")),
-            ("firepanda-live", format!("{live} {dead}")),
-            ("firepanda-unowned", String::new()),
+            (
+                "firepanda-dead",
+                Some(record(dead.cast_signed(), dead.cast_signed())),
+            ),
+            (
+                "firepanda-live",
+                Some(record(live.cast_signed(), dead.cast_signed())),
+            ),
+            ("firepanda-unowned", None),
         ] {
             std::fs::create_dir(root.join(name)).unwrap();
-            if !owner.is_empty() {
+            if let Some(owner) = owner {
                 std::fs::write(root.join(name).join(OWNER_FILE), owner).unwrap();
             }
         }
@@ -624,6 +956,48 @@ mod tests {
         assert!(root.join("firepanda-live").exists());
         assert!(root.join("firepanda-unowned").exists());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn backend_names_round_trip() {
+        assert_eq!(Backend::parse("lightpanda"), Some(Backend::Lightpanda));
+        assert_eq!(Backend::parse("obscura"), Some(Backend::Obscura));
+        assert_eq!(Backend::parse("auto"), None);
+        assert_eq!(Backend::parse("chrome"), None);
+        assert_eq!(Backend::Obscura.label(), "Obscura");
+        assert_eq!(Backend::Obscura.default_program(), "obscura");
+    }
+
+    #[test]
+    fn ready_record_requires_loopback_and_a_valid_path() {
+        let directory = make_socket_directory().unwrap();
+        let path = std::path::Path::new(&directory).join(READY_FILE);
+        for invalid in [
+            r#"{"pid":1,"host":"10.0.0.5","port":9222,"websocket_path":"/devtools/browser"}"#,
+            r#"{"pid":1,"host":"127.0.0.1","port":0,"websocket_path":"/devtools/browser"}"#,
+            r#"{"pid":1,"host":"127.0.0.1","port":9222,"websocket_path":"devtools"}"#,
+            r#"{"host":"127.0.0.1","port":9222,"websocket_path":"/devtools/browser"}"#,
+            "not json",
+        ] {
+            std::fs::write(&path, invalid).unwrap();
+            assert!(read_ready(&path).is_none(), "{invalid}");
+        }
+        std::fs::write(
+            &path,
+            r#"{"pid":1,"host":"127.0.0.1","port":9222,"websocket_path":"/devtools/browser"}"#,
+        )
+        .unwrap();
+        let ready = read_ready(&path).expect("valid ready record");
+        assert_eq!((ready.port, ready.pid), (9222, 1));
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn obscura_tokens_are_32_bytes_of_hex() {
+        let token = random_token().unwrap();
+        assert_eq!(token.len(), 64);
+        assert!(token.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_ne!(token, random_token().unwrap());
     }
 
     #[tokio::test]
@@ -693,7 +1067,7 @@ mod tests {
     async fn missing_managed_binary_reports_spawn_failure() {
         let browser = Browser::new(
             Options {
-                lightpanda: "/missing/lightpanda".to_string(),
+                program: "/missing/lightpanda".to_string(),
                 ..Options::default()
             },
             Stop::channel(),
@@ -712,8 +1086,7 @@ mod tests {
             })
             .await
             .unwrap_err();
-        assert!(error.contains("Cannot start Lightpanda"), "{error}");
-        // The failed launch's private directory is removed by shutdown.
+        assert!(error.contains("Cannot start Lightpanda"), "{error}"); // The failed launch's private directory is removed by shutdown.
         let process = browser.inner.process.lock().await;
         assert_eq!(process.directory, "");
         assert!(process.child.is_none());

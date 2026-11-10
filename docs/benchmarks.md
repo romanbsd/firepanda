@@ -71,6 +71,48 @@ The historical C++ build instead serialized the page to count it (or used a
 bounded counting stream in a separate microbenchmark). Crawl keeps the same
 4 MiB budget semantics.
 
+## Lightpanda vs Obscura (2026-11-10)
+
+`scripts/benchmark-backends.py` runs every tool against a deterministic local
+fixture on both backends and samples RSS and cumulative CPU (`ps`, 50 ms) for the
+service and its descendants. Search timings use local engine fixtures; a separate
+best-effort public search probe is reported but not used for comparison (Brave
+returned HTTP 429 during this run).
+
+Environment: macOS 26.6 arm64, Apple M5 Pro (15 CPUs), 48 GiB RAM, load average
+4.75 at start, Firepanda 0.2.0 release, Lightpanda
+1.1.0-nightly.11647 (`e988f663…`), Obscura 0.2.6. 30 samples per single-page
+scenario, 5 per crawl/map (crawl = 21 pages, `maxConcurrency=4`). CPU totals span
+the firepanda process plus its browser, so they can exceed 100%; very short
+scenarios are shown as `<tick` because `ps` reports CPU time in 10 ms ticks.
+
+| Scenario | Lightpanda median | Obscura median | Obscura / Lightpanda |
+| --- | ---: | ---: | ---: |
+| Cold launch + first scrape | 64.6 ms | 64.6 ms | 1.00× |
+| Static scrape | 2.3 ms | 4.0 ms | 1.74× |
+| 3000-paragraph article | 28.3 ms | 42.5 ms | 1.50× |
+| JavaScript readiness (300 ms timer) | 311.1 ms | 319.1 ms | 1.03× |
+| `fetch` JSON (no browser) | 0.2 ms | 0.3 ms | ≈1× |
+| Crawl 21 pages | 78.1 ms | 146.0 ms | 1.87× |
+| Map links (10000-link page) | 99.4 ms | 172.3 ms | 1.73× |
+| Map sitemap (50 URLs) | 2.0 ms | 4.1 ms | 2.05× |
+| Search (local engine fixture) | 0.3 ms | 0.3 ms | ≈1× |
+
+Idle RSS after the first scrape was 37.7 MB (Lightpanda) and 36.0 MB (Obscura).
+Under repeated article scrapes the gap widens: a fresh process grew from 37.7 MB
+to 94.1 MB after 50 pages (1.15 MB/page) with Lightpanda, and from 35.9 MB to
+334.1 MB (6.1 MB/page) with Obscura. In a separate 100-page probe Lightpanda
+reached 115.5 MB and Obscura 410.7 MB, plateauing around page 75 (V8 heap
+growth, not unbounded in this sample). Response payloads were byte-identical
+across engines in every scenario.
+
+Interpretation: Obscura costs roughly 1.5–2× the CPU and wall time of Lightpanda
+on rendered pages and 2–3.6× the resident memory during sustained crawls, while
+matching it on cold start and non-browser tools. Its advantage is V8 fidelity,
+rendering, and an active upstream; Lightpanda remains the lower-footprint default.
+These are local fixture numbers, not public-site latency or throughput claims. A
+loaded machine, heavy SPAs, or different CSS/DOM coverage can change the ranking.
+
 ## Readiness scan CPU (historical)
 
 The earlier C++ extractor instrumented its readiness probe: 10000 sidebar

@@ -6,27 +6,40 @@ HTTP API.
 
 ## Communication
 
-`MCP client -> stdin/stdout -> firepanda -> persistent WebSocket over UDS -> Lightpanda`
+`MCP client -> stdin/stdout -> firepanda -> persistent WebSocket -> Lightpanda (UDS) or Obscura (loopback TCP)`
 
 Lightpanda's native `serve --unix-socket` interface supports CDP WebSockets at
 `/`. Firepanda connects directly, without HTTP endpoint discovery or a TCP port.
 The socket lives in a `mkdtemp` directory with mode 0700; Lightpanda creates the
-socket with mode 0600. Each MCP process owns at most one lazy browser child.
-SIGTERM, idle expiry, EOF, and failure paths share one cleanup routine: close the
-pooled connections, send SIGTERM, wait up to 500 ms, then SIGKILL and reap. It only
-signals the child PID it created; an external browser is never terminated.
+socket with mode 0600.
+
+Obscura has no Unix-socket listener. Firepanda launches
+`obscura serve --host 127.0.0.1 --port 0 --ready-file … --workers 1` in the same
+private directory, sets a per-process `OBSCURA_CDP_TOKEN` (32 random bytes), and
+reads the atomically published `{pid,host,port,websocket_path}` record before
+connecting to `ws://127.0.0.1:PORT/devtools/browser` with
+`Authorization: Bearer …`. It also raises `OBSCURA_SCRIPT_DEADLINE_MS` to the
+largest tool page budget (120 s) and passes `--allow-private-network` by default
+to match Lightpanda's local-scrape behaviour.
+
+Each MCP process owns at most one lazy browser child. SIGTERM, idle expiry, EOF,
+and failure paths share one cleanup routine: close the pooled connections, send
+SIGTERM, wait up to 500 ms, then SIGKILL and reap. It only signals the child PID
+it created; an external browser is never terminated. A crashed process leaves an
+owner record (`owner.json`) beside the endpoint; the next launch proves the
+recorded endpoint is live and only then signals the recorded PID.
 
 ## Module map
 
 | Path | Responsibility |
 | --- | --- |
 | `src/main.rs` | stdio loop: chunked reads, line assembly, idle select arm, EOF/SIGTERM exit |
-| `src/cli.rs` | argv parsing and exit codes |
+| `src/cli.rs` | argv parsing, backend selection, exit codes |
 | `src/json.rs` | 64-level nesting check, bounded line parse, `serialized_size_within` |
 | `src/mcp.rs` | JSON-RPC framing, modern/legacy negotiation, result wrapping and size caps |
 | `src/tools.rs` | tool table, argument schema/validation, URL normalization, dispatch |
 | `src/tools/crawl.rs` | bounded BFS crawl/map, ordering, failure drain |
-| `src/browser/mod.rs` | process lifecycle, connection pool, idle bookkeeping, shutdown |
+| `src/browser/mod.rs` | backend adapters, endpoint readiness, process lifecycle, pool, idle bookkeeping, shutdown |
 | `src/browser/cdp.rs` | deadline-bounded CDP connection, scrape pipeline, validation |
 | `src/browser/extract.js` | in-page extractor (embedded with `include_str!`) |
 | `src/http.rs` | shared browser-impersonated HTTP client, deadline-bounded body reader |

@@ -1,19 +1,20 @@
-"""Map sitemap merge against a local fixture. No external website needed."""
+"""Map sitemap merge against a local fixture, on Lightpanda or Obscura."""
 import http.server
 import subprocess
 import sys
 import threading
 
-binary, lightpanda = sys.argv[1:3]
-
 from fixtures import Fixture
-from harness import Service
+from harness import backend_from, browser_service
+
+binary, browser = sys.argv[1:3]
+backend = backend_from(sys.argv)
 
 
 server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Fixture)
 threading.Thread(target=server.serve_forever, daemon=True).start()
 origin = "http://127.0.0.1:" + str(server.server_port)
-service = Service([binary, "--lightpanda", lightpanda])
+service = browser_service(binary, backend, browser)
 
 
 def tool(**arguments):

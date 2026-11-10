@@ -36,6 +36,7 @@ with tempfile.TemporaryDirectory() as directory:
     shutil.copytree(ROOT / 'docs', stage / 'docs')
     (stage / 'scripts').mkdir()
     shutil.copy2(ROOT / 'scripts/install-lightpanda.py', stage / 'scripts/install-lightpanda.py')
+    shutil.copy2(ROOT / 'scripts/install-obscura.py', stage / 'scripts/install-obscura.py')
     with tarfile.open(archive, 'w:gz') as output:
         output.add(stage, arcname=name)
 digest = hashlib.sha256(archive.read_bytes()).hexdigest()
