@@ -682,6 +682,10 @@ fn launch(process: &mut Process) -> Result<(), String> {
                 .arg(&socket)
                 .arg("--log-level")
                 .arg("error");
+            if !process.options.allow_private_network {
+                // Lightpanda ≥ 1.0.4 refuses private/internal addresses after DNS resolution.
+                command.arg("--block-private-networks");
+            }
             process.endpoint = Some(Endpoint::Unix { path: socket });
         }
         Backend::Obscura => {

@@ -161,8 +161,9 @@ fn finish(
     if options.obey_robots && !obscura {
         return Err("--obey-robots requires --backend obscura".to_string());
     }
-    if !options.allow_private_network && !obscura {
-        return Err("--no-private-network requires --backend obscura".to_string());
+    // An external browser keeps its own network policy; only a managed one can be guarded.
+    if !options.allow_private_network && !options.socket.is_empty() {
+        return Err("--no-private-network cannot be combined with --socket".to_string());
     }
     Ok(options)
 }
@@ -269,12 +270,27 @@ mod tests {
 
     #[test]
     fn obscura_only_flags_are_rejected_for_lightpanda() {
-        for flag in ["--stealth", "--obey-robots", "--no-private-network"] {
+        for flag in ["--stealth", "--obey-robots"] {
             assert!(run(&["--backend", "lightpanda", flag]).is_err(), "{flag}");
             assert!(run(&["--backend", "obscura", flag]).is_ok(), "{flag}");
         }
-        let options = parse_ok(&["--backend", "obscura", "--no-private-network"]);
-        assert!(!options.allow_private_network);
+    }
+
+    #[test]
+    fn private_network_guard_needs_a_managed_browser() {
+        for backend in ["lightpanda", "obscura"] {
+            let options = parse_ok(&["--backend", backend, "--no-private-network"]);
+            assert!(!options.allow_private_network, "{backend}");
+        }
+        assert!(run(&["--socket", "/tmp/my.sock", "--no-private-network"]).is_err());
+        assert!(
+            run(&[
+                "--cdp-url",
+                "ws://127.0.0.1:1/devtools/browser",
+                "--no-private-network"
+            ])
+            .is_err()
+        );
     }
 
     #[test]

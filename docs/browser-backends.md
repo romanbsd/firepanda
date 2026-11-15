@@ -251,7 +251,7 @@ firepanda [--backend lightpanda|obscura|auto]
           [--cdp-url ws://host:port/...]     (new: external endpoint, any engine)
           [--idle-timeout SECONDS]           (unchanged, 0..=86400)
           [--stealth] [--obey-robots]        (obscura only; exit 2 otherwise)
-          [--no-private-network]             (obscura SSRF guard opt-in)
+          [--no-private-network]             (managed-browser SSRF guard opt-in)
 ```
 
 Rules, matching the existing strict CLI style (exit code 2 on validation):

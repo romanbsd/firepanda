@@ -207,4 +207,23 @@ finally:
     assert guarded.process.returncode == 0, guarded.process.returncode
 
 print("PASS: fetch — --no-private-network refuses loopback literals and hostnames")
+
+# The same flag makes managed Lightpanda refuse private destinations too.
+guarded = Service([binary, "--lightpanda", lightpanda, "--no-private-network"])
+hits_before = len(server.hits)
+try:
+    for url in (f"http://127.0.0.1:{port}/page.html", f"http://localhost:{port}/page.html"):
+        reply = guarded.call("tools/call", name="scrape", arguments={"url": url, "formats": ["text"]})
+        assert reply.get("isError"), (url, reply)
+    assert len(server.hits) == hits_before, server.hits[hits_before:]
+finally:
+    guarded.process.stdin.close()
+    try:
+        guarded.process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        guarded.process.kill()
+        guarded.process.wait()
+        raise
+
+print("PASS: scrape — --no-private-network makes Lightpanda refuse loopback")
 server.shutdown()

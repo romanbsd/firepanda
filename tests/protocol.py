@@ -203,7 +203,7 @@ class Protocol(unittest.TestCase):
             ["--socket", "relative.sock"],
             ["--backend", "lightpanda", "--stealth"],
             ["--backend", "lightpanda", "--obey-robots"],
-            ["--backend", "lightpanda", "--no-private-network"],
+            ["--socket", "/tmp/cdp.sock", "--no-private-network"],
             ["--backend", "obscura", "--cdp-url", "ws://127.0.0.1:1/devtools/browser", "--stealth"],
         ]
         for args in invalid:
@@ -213,6 +213,7 @@ class Protocol(unittest.TestCase):
             ["--backend", "obscura"],
             ["--backend", "obscura", "--stealth"],
             ["--backend", "obscura", "--no-private-network"],
+            ["--backend", "lightpanda", "--no-private-network"],
             ["--backend", "auto", "--browser", "/opt/obscura"],
             ["--cdp-url", "ws://127.0.0.1:1/devtools/browser"],
         ]
