@@ -16,8 +16,9 @@ inactivity.
 - **scrape**: rendered Markdown, text, cleaned HTML, raw HTML, and links.
 - **crawl**: bounded, breadth-first traversal of same-origin pages.
 - **map**: anchor-link discovery, including external links without following them.
-- **search**: keyless web search through DuckDuckGo and Brave,
-  using browser-impersonated HTTP requests instead of a browser or an API key.
+- **search**: web search through the Brave Search API when `BRAVE_API_KEY`
+  is set, otherwise keyless DuckDuckGo and Brave through browser-impersonated
+  HTTP requests.
 
 This is a focused scraping service. It does not provide screenshots, LLM
 extraction, or full Firecrawl API compatibility. Websites requiring browser APIs
@@ -86,11 +87,15 @@ firepanda [--backend lightpanda|obscura|auto]
 - `--backend obscura` launches `obscura serve` on an ephemeral loopback port,
   guarded by a per-process bearer token and a private ready file. Obscura blocks
   private addresses by default; firepanda enables `--allow-private-network` to
-  match Lightpanda, and `--no-private-network` opts back into the guard. The same
-  flag guards Firepanda's own HTTP requests (`fetch` and `map` sitemap reads):
+  match Lightpanda.
+- `--no-private-network` refuses private destinations for the managed browser
+  (Lightpanda ≥ 1.0.4 `--block-private-networks`, or Obscura's own guard) and
+  for Firepanda's own HTTP requests (`fetch` and `map` sitemap reads):
   IP-literal hosts and every redirect hop are checked before sending, and
   hostnames resolve only to public addresses. Loopback, private, link-local
-  (including `169.254.169.254`), shared, and reserved ranges are refused.
+  (including `169.254.169.254`), shared, and reserved ranges are refused. An
+  external browser (`--socket`, `--cdp-url`) keeps its own policy, so the flag
+  cannot be combined with those.
 - `--stealth` and `--obey-robots` are Obscura-only and rejected for Lightpanda.
 - `--socket` attaches to an external Lightpanda Unix socket. `--cdp-url` attaches
   to any external CDP WebSocket endpoint (for example an `obscura serve` you
@@ -292,10 +297,13 @@ initial page-load event. Firepanda does not bypass access controls.
 See [Firecrawl parity](docs/firecrawl-parity.md) for the implemented subset and
 intentional response-shape differences.
 
-Search is keyless and local: requests use primp browser impersonation to the
-DuckDuckGo HTML endpoint (Brave as fallback). Engine availability depends on the
-network and can change; the offline fixture suite pins parsing and fallback
-behavior without contacting either engine.
+With `BRAVE_API_KEY` set, `auto` search uses the
+[Brave Search API](https://brave.com/search/api/) first; the key is sent only
+as the `X-Subscription-Token` header. Without a key, search is keyless: requests
+use primp browser impersonation to the DuckDuckGo HTML endpoint (Brave as
+fallback), and engine availability depends on the network and can change. The
+offline fixture suite pins parsing and fallback behavior without contacting any
+engine.
 
 HTTP 429 is handled per engine. A `Retry-After` header is honored when it fits
 inside the remaining timeout; short retries run when the budget allows. If an
@@ -490,7 +498,7 @@ CI runs the full suite on macOS and Linux and verifies release packaging. See [c
 
 The stdio service uses the MCP client's local permissions. Target pages execute
 JavaScript in Lightpanda and can access whatever network that process can reach;
-a private control socket is not network isolation. With Obscura,
+a private control socket is not network isolation. With a managed browser,
 `--no-private-network` refuses private destinations for both the browser and
 raw HTTP requests; it does not cover an HTTP proxy configured in the
 environment. Otherwise use appropriate egress controls

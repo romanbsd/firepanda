@@ -831,7 +831,7 @@ mod tests {
                 assert_eq!(properties["limit"]["maximum"], 20);
                 assert_eq!(
                     properties["engine"]["enum"],
-                    json!(["auto", "duckduckgo", "brave"])
+                    json!(["auto", "duckduckgo", "brave", "brave_api"])
                 );
                 assert!(properties["query"].get("maxLength").is_none());
                 assert!(

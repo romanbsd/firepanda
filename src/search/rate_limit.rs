@@ -76,7 +76,7 @@ pub fn rate_limited_error(engine: Engine, wait: Duration) -> String {
 }
 
 /// Cooldown deadline per engine, indexed by `Engine as usize`.
-static SLOTS: Mutex<[Option<Instant>; 2]> = Mutex::new([None, None]);
+static SLOTS: Mutex<[Option<Instant>; 3]> = Mutex::new([None, None, None]);
 
 fn slot(engine: Engine) -> Option<Instant> {
     SLOTS

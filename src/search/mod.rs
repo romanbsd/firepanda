@@ -1,4 +1,5 @@
-//! Keyless web search through `DuckDuckGo` and Brave HTML endpoints.
+//! Web search through the Brave Search API when `BRAVE_API_KEY` is set,
+//! with keyless `DuckDuckGo` and Brave HTML endpoints as fallbacks.
 //!
 //! Engine recipes are ported from `ddgs` (`ddgs/engines/duckduckgo.py` and
 //! `brave.py`): primp performs browser-impersonated requests, and `scraper`
@@ -8,8 +9,8 @@
 //! The response mirrors Firecrawl v2 search (`{"success": true, "data":
 //! {"web": [...]}}`) so callers can swap a keyed service for this tool.
 //!
-//! `FIREPANDA_SEARCH_DDG_URL` and `FIREPANDA_SEARCH_BRAVE_URL` override the
-//! engine endpoints; the offline fixture tests use them to point at a local
+//! `FIREPANDA_SEARCH_DDG_URL`, `FIREPANDA_SEARCH_BRAVE_URL` and
+//! `FIREPANDA_SEARCH_BRAVE_API_URL` override the engine endpoints; the offline fixture tests use them to point at a local
 //! server instead of the network.
 
 use crate::http;
@@ -30,21 +31,27 @@ const MAX_TIMEOUT_MS: i64 = 60000;
 
 const DDG_URL: &str = "https://html.duckduckgo.com/html/";
 const BRAVE_URL: &str = "https://search.brave.com/search";
+const BRAVE_API_URL: &str = "https://api.search.brave.com/res/v1/web/search";
 const DDG_OVERRIDE: &str = "FIREPANDA_SEARCH_DDG_URL";
 const BRAVE_OVERRIDE: &str = "FIREPANDA_SEARCH_BRAVE_URL";
+const BRAVE_API_OVERRIDE: &str = "FIREPANDA_SEARCH_BRAVE_API_URL";
+/// Brave Search API subscription token; enables the keyed engine.
+const BRAVE_API_KEY: &str = "BRAVE_API_KEY";
+/// The API's maximum page size; results are capped at `limit` after dedupe.
+const BRAVE_API_COUNT: &str = "20";
 /// Engine pages are small; cap the body so a pathological response cannot
 /// consume unbounded memory before parsing.
 const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 
 /// Shared by `tools/list` and the tool table so the two cannot drift.
-pub const DESCRIPTION: &str =
-    "Web search via DuckDuckGo and Brave, no API key. Returns titles, URLs, and snippets.";
+pub const DESCRIPTION: &str = "Web search via the Brave Search API (when BRAVE_API_KEY is set) or keyless DuckDuckGo and Brave. Returns titles, URLs, and snippets.";
 
 /// Discriminants index the per-engine rate-limit slots.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Engine {
     DuckDuckGo = 0,
     Brave = 1,
+    BraveApi = 2,
 }
 
 impl std::fmt::Display for Engine {
@@ -52,6 +59,7 @@ impl std::fmt::Display for Engine {
         formatter.write_str(match self {
             Self::DuckDuckGo => "DuckDuckGo",
             Self::Brave => "Brave",
+            Self::BraveApi => "Brave Search API",
         })
     }
 }
@@ -63,7 +71,8 @@ impl Engine {
             "auto" => Ok(None),
             "duckduckgo" | "ddg" => Ok(Some(Self::DuckDuckGo)),
             "brave" => Ok(Some(Self::Brave)),
-            _ => Err("engine must be auto, duckduckgo, or brave".to_string()),
+            "brave_api" => Ok(Some(Self::BraveApi)),
+            _ => Err("engine must be auto, duckduckgo, brave, or brave_api".to_string()),
         }
     }
 }
@@ -143,9 +152,9 @@ pub fn input_schema() -> Value {
                 },
                 "engine": {
                     "type": "string",
-                    "enum": ["auto", "duckduckgo", "brave"],
+                    "enum": ["auto", "duckduckgo", "brave", "brave_api"],
                     "default": "auto",
-                    "description": "auto tries each engine in turn",
+                    "description": "auto tries the Brave Search API (when keyed), then DuckDuckGo, then Brave",
                 },
                 "timeout": {
                     "type": "integer",
@@ -165,6 +174,8 @@ pub async fn execute(query: &Query) -> Result<Value, String> {
     let engines: &[Engine] = match query.engine {
         Some(Engine::DuckDuckGo) => &[Engine::DuckDuckGo],
         Some(Engine::Brave) => &[Engine::Brave],
+        Some(Engine::BraveApi) => &[Engine::BraveApi],
+        None if brave_api_key().is_some() => &[Engine::BraveApi, Engine::DuckDuckGo, Engine::Brave],
         None => &[Engine::DuckDuckGo, Engine::Brave],
     };
     let deadline = tokio::time::Instant::now() + query.timeout;
@@ -179,6 +190,7 @@ pub async fn execute(query: &Query) -> Result<Value, String> {
         let base = match engine {
             Engine::DuckDuckGo => endpoint(DDG_OVERRIDE, DDG_URL),
             Engine::Brave => endpoint(BRAVE_OVERRIDE, BRAVE_URL),
+            Engine::BraveApi => endpoint(BRAVE_API_OVERRIDE, BRAVE_API_URL),
         };
         match search_engine(*engine, &base, &query.text, remaining).await {
             Ok(items) if !items.is_empty() => {
@@ -196,6 +208,12 @@ pub async fn execute(query: &Query) -> Result<Value, String> {
         }
     }
     Err(last_error)
+}
+
+fn brave_api_key() -> Option<String> {
+    std::env::var(BRAVE_API_KEY)
+        .ok()
+        .filter(|value| !value.is_empty())
 }
 
 fn endpoint(override_name: &str, default_url: &str) -> String {
@@ -226,6 +244,16 @@ async fn search_engine(
                     .query(&[("q", query), ("b", ""), ("l", "us-en")])
             }
             Engine::Brave => client.get(base).query(&[("q", query), ("source", "web")]),
+            Engine::BraveApi => {
+                let Some(key) = brave_api_key() else {
+                    return Err(format!("{BRAVE_API_KEY} is not set"));
+                };
+                client
+                    .get(base)
+                    .query(&[("q", query), ("count", BRAVE_API_COUNT)])
+                    .header("Accept", "application/json")
+                    .header("X-Subscription-Token", key)
+            }
         };
         let response = tokio::time::timeout_at(deadline, request.send())
             .await
@@ -257,6 +285,7 @@ async fn search_engine(
         return Ok(match engine {
             Engine::DuckDuckGo => parse_ddg(&body, base),
             Engine::Brave => parse_brave(&body, base),
+            Engine::BraveApi => parse_brave_api(&body),
         });
     }
 }
@@ -353,6 +382,34 @@ fn parse_ddg(document: &str, base: &str) -> Vec<Item> {
 
 /// Brave search: `//div[@data-type='web']` items, last title div, anchor that
 /// wraps a title div, and `div.snippet div.content` text.
+/// Brave Search API JSON: `web.results[]` with `title`, `url`, and an HTML
+/// `description` whose highlight tags and entities are reduced to text.
+fn parse_brave_api(body: &str) -> Vec<Item> {
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return Vec::new();
+    };
+    let text = |html: &str| collapse(&Html::parse_fragment(html).root_element());
+    value
+        .pointer("/web/results")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|result| {
+            let url = url::Url::parse(result.get("url")?.as_str()?).ok()?;
+            Some(Item {
+                title: text(result.get("title")?.as_str()?),
+                url: normalize_parsed(url).ok()?,
+                description: text(
+                    result
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .unwrap_or(""),
+                ),
+            })
+        })
+        .collect()
+}
+
 fn parse_brave(document: &str, base: &str) -> Vec<Item> {
     let Ok(base) = url::Url::parse(base) else {
         return Vec::new();
@@ -440,6 +497,23 @@ fn result_url(href: &str, base: &url::Url) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn brave_api_results_reduce_html_descriptions_to_text() {
+        let body = r#"{"web": {"results": [
+            {"title": "Snakes &amp; vipers", "url": "https://example.com/snakes#top",
+             "description": "The <strong>Palestine viper</strong> is common."},
+            {"title": "No URL"},
+            {"title": "Bad scheme", "url": "javascript:alert(1)", "description": "x"}
+        ]}}"#;
+        let items = parse_brave_api(body);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].title, "Snakes & vipers");
+        assert_eq!(items[0].url, "https://example.com/snakes");
+        assert_eq!(items[0].description, "The Palestine viper is common.");
+        assert!(parse_brave_api("not json").is_empty());
+        assert!(parse_brave_api("{}").is_empty());
+    }
 
     #[test]
     fn ddg_redirects_decode_and_ads_are_filtered() {

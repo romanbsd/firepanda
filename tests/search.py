@@ -50,6 +50,12 @@ BRAVE_PAGE = """<!doctype html><html><body>
 
 EMPTY_PAGE = "<!doctype html><html><body><p>No results found</p></body></html>"
 
+BRAVE_API_BODY = json.dumps({"web": {"results": [
+    {"title": "API One", "url": "https://api.example/one",
+     "description": "First <strong>keyed</strong> result"},
+    {"title": "API Two", "url": "https://api.example/two", "description": "Second"},
+]}})
+
 
 class Engines(http.server.BaseHTTPRequestHandler):
     """Canned engine pages; records the request each engine received."""
@@ -76,7 +82,12 @@ class Engines(http.server.BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
     def route(self, path, body):
-        if path == "/brave-429-retry":
+        if path == "/brave-api":
+            if self.headers.get("X-Subscription-Token") != "test-key":
+                self.reply(401, "missing token")
+            else:
+                self.reply(200, BRAVE_API_BODY)
+        elif path == "/brave-429-retry":
             if self.server.hits.get(path, 0) == 1:
                 self.rate_limited("1")
             else:
@@ -122,10 +133,14 @@ threading.Thread(target=server.serve_forever, daemon=True).start()
 base = "http://127.0.0.1:" + str(server.server_port)
 
 
-def service_for(ddg="/ddg", brave="/brave"):
+def service_for(ddg="/ddg", brave="/brave", brave_api="/brave-api", key=None):
     env = dict(os.environ,
                FIREPANDA_SEARCH_DDG_URL=base + ddg,
-               FIREPANDA_SEARCH_BRAVE_URL=base + brave)
+               FIREPANDA_SEARCH_BRAVE_URL=base + brave,
+               FIREPANDA_SEARCH_BRAVE_API_URL=base + brave_api)
+    env.pop("BRAVE_API_KEY", None)
+    if key is not None:
+        env["BRAVE_API_KEY"] = key
     return Service([binary, "--lightpanda", lightpanda], env=env)
 
 
@@ -287,6 +302,25 @@ try:
     huge = service.call("tools/call", name="search",
                         arguments={"query": "x", "engine": "duckduckgo"})
     assert huge.get("isError") and "exceeds 8 MiB" in huge["content"][0]["text"], huge
+finally:
+    stop(service)
+
+# With a key, auto search uses the Brave Search API and sends the token as a
+# header; without one, an explicit brave_api search is a tool error.
+server.hits.clear()
+service = service_for(key="test-key")
+try:
+    web = results(service.tool("search", query="vipers", limit=5))
+    assert [item["url"] for item in web] == ["https://api.example/one", "https://api.example/two"], web
+    assert web[0]["description"] == "First keyed result", web
+    assert server.hits.get("/brave-api") == 1 and "/ddg" not in server.hits, server.hits
+finally:
+    stop(service)
+service = service_for()
+try:
+    missing = service.call("tools/call", name="search",
+                           arguments={"query": "x", "engine": "brave_api"})
+    assert missing.get("isError") and "BRAVE_API_KEY" in missing["content"][0]["text"], missing
 finally:
     stop(service)
 
