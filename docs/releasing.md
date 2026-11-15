@@ -38,6 +38,7 @@ runtime dependencies should keep the binary small.
 ## Prepare a release
 
 1. Bump `version` in `Cargo.toml` (and refresh `Cargo.lock`).
+   Add the release's user-facing changes to `CHANGELOG.md`.
 2. Run `make check`, `make test`, and `make gates`.
 3. Confirm the release build reports the new version:
    `cargo build --release && target/release/firepanda --version`.
@@ -52,11 +53,11 @@ runtime dependencies should keep the binary small.
 From a tested source build:
 
 ```sh
-python3 scripts/package-release.py --binary target/release/firepanda --tag v0.1.0
+python3 scripts/package-release.py --binary target/release/firepanda --tag v0.1.1
 ```
 
 The script writes `dist/firepanda-VERSION-OS-ARCH.tar.gz` and an accompanying
-`.sha256`. The archive includes `bin/firepanda`, README, docs, both browser
+`.sha256`. The archive includes `bin/firepanda`, README, changelog, docs, both browser
 installers, and Firepanda's MIT license. It does not bundle Lightpanda or Obscura,
 local configuration, build caches, or review artifacts. Architecture is detected
 from the native runner; these are not universal macOS binaries or cross-compiled

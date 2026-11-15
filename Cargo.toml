@@ -1,6 +1,6 @@
 [package]
 name = "firepanda"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 
 # Parity contract: tests/protocol.py, tests/transport.py, tests/integration.py and

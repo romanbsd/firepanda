@@ -32,6 +32,7 @@ with tempfile.TemporaryDirectory() as directory:
     (stage / 'bin').mkdir(parents=True)
     shutil.copy2(args.binary, stage / 'bin/firepanda')
     shutil.copy2(ROOT / 'README.md', stage / 'README.md')
+    shutil.copy2(ROOT / 'CHANGELOG.md', stage / 'CHANGELOG.md')
     shutil.copy2(ROOT / 'LICENSE', stage / 'LICENSE')
     shutil.copytree(ROOT / 'docs', stage / 'docs')
     (stage / 'scripts').mkdir()
