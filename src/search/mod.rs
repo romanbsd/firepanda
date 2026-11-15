@@ -334,8 +334,7 @@ fn parse_ddg(document: &str, base: &str) -> Vec<Item> {
         let title = item
             .select(titles)
             .next()
-            .map(|element| collapse(&element))
-            .unwrap_or_default();
+            .map_or_default(|element| collapse(&element));
         let description = item
             .select(snippets)
             .next()
@@ -383,14 +382,12 @@ fn parse_brave(document: &str, base: &str) -> Vec<Item> {
         let title = item
             .select(title_text)
             .last()
-            .map(|element| collapse(&element))
-            .unwrap_or_default();
+            .map_or_default(|element| collapse(&element));
         let description = item
             .select(snippets)
             .next()
             .or_else(|| item.select(snippet_fallback).next())
-            .map(|element| collapse(&element))
-            .unwrap_or_default();
+            .map_or_default(|element| collapse(&element));
         if title.is_empty() || description.is_empty() {
             continue;
         }

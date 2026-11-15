@@ -7,8 +7,8 @@ Run the formatting/lint/test targets, then the full gates with a native browser:
 ```sh
 make check
 make test
-python3 scripts/install-lightpanda.py --release 1.0.2
-python3 scripts/install-obscura.py --release v0.2.6
+python3 scripts/install-lightpanda.py --release 1.0.4
+python3 scripts/install-obscura.py --release v0.2.7
 make gates           # protocol, transport, installer, fetch, search, integration, memory
 make gates-obscura   # the browser suites against Obscura
 ```
@@ -42,14 +42,17 @@ runtime dependencies should keep the binary small.
 3. Confirm the release build reports the new version:
    `cargo build --release && target/release/firepanda --version`.
 4. Tag `vVERSION` and push. The Release workflow builds and tests the tagged
-   tree on macOS and Ubuntu, packages archives, and creates a draft release.
+   tree on native runners for Linux amd64 (`ubuntu-24.04`), Linux arm64
+   (`ubuntu-24.04-arm`), and macOS arm64 (`macos-15`). It packages an archive
+   and SHA-256 checksum for each platform, then creates a draft GitHub release
+   with all three archives and their checksums after every build succeeds.
 
 ## Package locally
 
 From a tested source build:
 
 ```sh
-python3 scripts/package-release.py --binary target/release/firepanda --tag v0.2.0
+python3 scripts/package-release.py --binary target/release/firepanda --tag v0.1.0
 ```
 
 The script writes `dist/firepanda-VERSION-OS-ARCH.tar.gz` and an accompanying
@@ -57,7 +60,9 @@ The script writes `dist/firepanda-VERSION-OS-ARCH.tar.gz` and an accompanying
 installers, and Firepanda's MIT license. It does not bundle Lightpanda or Obscura,
 local configuration, build caches, or review artifacts. Architecture is detected
 from the native runner; these are not universal macOS binaries or cross-compiled
-Linux binaries. Ubuntu-built binaries depend on the runner's libc/toolchain and
+Linux binaries. Archive architecture names follow `platform.machine()`:
+`x86_64` for Linux amd64, `aarch64` for Linux arm64, and `arm64` for macOS arm64.
+Ubuntu-built binaries depend on the runner's libc/toolchain and
 may need rebuilding for older distributions.
 
 After extracting an archive, install Lightpanda or Obscura using the included

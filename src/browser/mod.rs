@@ -844,9 +844,7 @@ fn probe_json_version(host: &str, port: u16, token: Option<&str>) -> bool {
     };
     let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
     let _ = stream.set_write_timeout(Some(Duration::from_millis(200)));
-    let auth = token
-        .map(|token| format!("Authorization: Bearer {token}\r\n"))
-        .unwrap_or_default();
+    let auth = token.map_or_default(|token| format!("Authorization: Bearer {token}\r\n"));
     let request = format!(
         "GET /json/version HTTP/1.1\r\nHost: {authority}\r\n{auth}Connection: close\r\n\r\n"
     );

@@ -32,8 +32,8 @@ to run the compiled service. macOS and Linux are supported; Windows is not.
 From a checkout of this repository:
 
 ```sh
-python3 scripts/install-lightpanda.py --release 1.0.2
-# or: python3 scripts/install-obscura.py --release v0.2.6
+python3 scripts/install-lightpanda.py --release 1.0.4
+# or: python3 scripts/install-obscura.py --release v0.2.7
 cargo build --release
 ./target/release/firepanda --lightpanda "$PWD/.local/bin/lightpanda"
 # or: ./target/release/firepanda --backend obscura --browser "$PWD/.local/bin/obscura"
@@ -67,7 +67,7 @@ You can also supply an existing Lightpanda binary with `--lightpanda`.
 `scripts/install-obscura.py` follows the same rules: it downloads the platform
 archive defaulting to the latest release, verifies the archive SHA-256, installs
 `obscura` and `obscura-worker` side by side, and writes `obscura.json`. Select a
-tested tag with `--release v0.2.6`; `--stealth` and `--no-render` choose the
+tested tag with `--release v0.2.7`; `--stealth` and `--no-render` choose the
 matching release variant.
 
 ### Browser backends
@@ -113,7 +113,7 @@ Obscura is installed separately. After extracting an archive and entering its
 directory, use the included installer and prebuilt executable:
 
 ```sh
-python3 scripts/install-lightpanda.py --release 1.0.2
+python3 scripts/install-lightpanda.py --release 1.0.4
 ./bin/firepanda --lightpanda "$PWD/.local/bin/lightpanda"
 ```
 

@@ -174,8 +174,7 @@ fn resolve_auto(options: &Options, program_given: bool) -> Backend {
     if program_given {
         let name = std::path::Path::new(&options.program)
             .file_name()
-            .map(|name| name.to_string_lossy().to_ascii_lowercase())
-            .unwrap_or_default();
+            .map_or_default(|name| name.to_string_lossy().to_ascii_lowercase());
         if name.contains("obscura") {
             return Backend::Obscura;
         }

@@ -344,12 +344,12 @@ fn extract_locs(body: &[u8], final_url: &str, start_origin: &str) -> Result<Locs
             .map_err(|error| format!("Sitemap XML is invalid: {error}"))?;
         match event {
             Event::Start(event) => {
-                let name = event.local_name().as_ref().to_vec();
+                let name = event.local_name().as_ref().as_bytes().to_vec();
                 note_element(&stack, &mut saw_root, &mut capturing, &mut loc, &name)?;
                 stack.push(name);
             }
             Event::Empty(event) => {
-                let name = event.local_name().as_ref().to_vec();
+                let name = event.local_name().as_ref().as_bytes().to_vec();
                 note_element(&stack, &mut saw_root, &mut capturing, &mut loc, &name)?;
                 // An empty `loc` has no text. Do not leave `capturing` set, and
                 // do not clear it for an empty element nested inside a real loc.
@@ -359,18 +359,12 @@ fn extract_locs(body: &[u8], final_url: &str, start_origin: &str) -> Result<Locs
             }
             Event::Text(event) => {
                 if capturing {
-                    let text = event
-                        .decode()
-                        .map_err(|error| format!("Sitemap XML is invalid: {error}"))?;
-                    loc.push_str(&text);
+                    loc.push_str(&event);
                 }
             }
             Event::CData(event) => {
                 if capturing {
-                    let text = event
-                        .decode()
-                        .map_err(|error| format!("Sitemap XML is invalid: {error}"))?;
-                    loc.push_str(&text);
+                    loc.push_str(&event);
                 }
             }
             Event::GeneralRef(event) => {
@@ -379,14 +373,9 @@ fn extract_locs(body: &[u8], final_url: &str, start_origin: &str) -> Result<Locs
                 }
             }
             Event::End(event) => {
-                let name = event.local_name().as_ref().to_vec();
+                let name = event.local_name().as_ref().as_bytes().to_vec();
                 if capturing && name.as_slice() == b"loc" {
-                    let parent = stack
-                        .iter()
-                        .rev()
-                        .nth(1)
-                        .map(Vec::as_slice)
-                        .unwrap_or_default();
+                    let parent = stack.iter().rev().nth(1).map_or_default(Vec::as_slice);
                     accept_loc(&mut locs, parent, &loc, final_url, start_origin);
                     capturing = false;
                 }
@@ -468,10 +457,7 @@ fn reference_text(event: &quick_xml::events::BytesRef<'_>) -> Result<String, Str
     {
         return Ok(ch.to_string());
     }
-    let name = event
-        .decode()
-        .map_err(|error| format!("Sitemap XML is invalid: {error}"))?;
-    quick_xml::escape::resolve_xml_entity(&name)
+    quick_xml::escape::resolve_xml_entity(event)
         .map(ToString::to_string)
         .ok_or_else(|| "Sitemap XML entity is not defined".to_string())
 }
