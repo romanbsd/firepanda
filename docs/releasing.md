@@ -53,7 +53,7 @@ runtime dependencies should keep the binary small.
 From a tested source build:
 
 ```sh
-python3 scripts/package-release.py --binary target/release/firepanda --tag v0.1.1
+python3 scripts/package-release.py --binary target/release/firepanda --tag v0.1.2
 ```
 
 The script writes `dist/firepanda-VERSION-OS-ARCH.tar.gz` and an accompanying
