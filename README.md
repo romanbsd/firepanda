@@ -86,7 +86,11 @@ firepanda [--backend lightpanda|obscura|auto]
 - `--backend obscura` launches `obscura serve` on an ephemeral loopback port,
   guarded by a per-process bearer token and a private ready file. Obscura blocks
   private addresses by default; firepanda enables `--allow-private-network` to
-  match Lightpanda, and `--no-private-network` opts back into the guard.
+  match Lightpanda, and `--no-private-network` opts back into the guard. The same
+  flag guards Firepanda's own HTTP requests (`fetch` and `map` sitemap reads):
+  IP-literal hosts and every redirect hop are checked before sending, and
+  hostnames resolve only to public addresses. Loopback, private, link-local
+  (including `169.254.169.254`), shared, and reserved ranges are refused.
 - `--stealth` and `--obey-robots` are Obscura-only and rejected for Lightpanda.
 - `--socket` attaches to an external Lightpanda Unix socket. `--cdp-url` attaches
   to any external CDP WebSocket endpoint (for example an `obscura serve` you
@@ -486,7 +490,10 @@ CI runs the full suite on macOS and Linux and verifies release packaging. See [c
 
 The stdio service uses the MCP client's local permissions. Target pages execute
 JavaScript in Lightpanda and can access whatever network that process can reach;
-a private control socket is not network isolation. Use appropriate egress controls
+a private control socket is not network isolation. With Obscura,
+`--no-private-network` refuses private destinations for both the browser and
+raw HTTP requests; it does not cover an HTTP proxy configured in the
+environment. Otherwise use appropriate egress controls
 when browsing untrusted URLs or exposing tools to other users.
 
 Firepanda is [MIT licensed](LICENSE). Rust dependencies are MIT/Apache-2.0

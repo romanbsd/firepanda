@@ -120,6 +120,9 @@ async fn serve(options: browser::Options, stop: browser::Stop) -> i32 {
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() {
     let options = cli::parse();
+    if !options.allow_private_network {
+        http::block_private_network();
+    }
     let stop = browser::Stop::channel();
     let install = |kind| {
         tokio::signal::unix::signal(kind).unwrap_or_else(|error| {

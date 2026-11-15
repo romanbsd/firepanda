@@ -195,20 +195,20 @@ impl Collector {
 /// Does not request `/sitemap.xml` unless robots names it.
 pub async fn collect(start_origin: &str, deadline: tokio::time::Instant) -> Collected {
     let mut collector = Collector::new(start_origin);
-    let client = match http::client() {
-        Ok(client) => client,
-        Err(message) => {
-            let robots = collector.robots_url.clone();
-            collector.note_failure(&robots, message, false);
-            return collector.finish();
-        }
-    };
     while let Some(url) = collector.next_request() {
         if tokio::time::Instant::now() >= deadline {
             collector.stop_for_deadline(&url);
             break;
         }
-        let response = match tokio::time::timeout_at(deadline, client.get(&url).send()).await {
+        let get = match http::get(&url) {
+            Ok(get) => get,
+            Err(message) => {
+                let counts = url != collector.robots_url;
+                collector.note_failure(&url, message, counts);
+                continue;
+            }
+        };
+        let response = match tokio::time::timeout_at(deadline, get.send()).await {
             Err(_) => {
                 collector.stop_for_deadline(&url);
                 break;

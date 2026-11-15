@@ -181,4 +181,30 @@ finally:
     assert service.process.returncode == 0, service.process.returncode
 
 print("PASS: fetch — JSON/Markdown/XML/images, redirects, caps, timeouts, no browser")
+
+# --no-private-network guards raw HTTP too: IP literals and hostnames that
+# resolve to loopback are refused before any request reaches the server.
+# fetch never starts the browser, so the Obscura path need not exist.
+guarded = Service([binary, "--backend", "obscura", "--browser", "/nonexistent/obscura",
+                   "--no-private-network"])
+port = server.server_port
+hits_before = len(server.hits)
+try:
+    for url in (f"http://127.0.0.1:{port}/data.json", f"http://localhost:{port}/data.json",
+                f"http://[::ffff:127.0.0.1]:{port}/data.json"):
+        reply = guarded.call("tools/call", name="fetch", arguments={"url": url})
+        text = reply["content"][0]["text"] if reply.get("content") else ""
+        assert reply.get("isError") and "private" in text.lower(), (url, reply)
+    assert len(server.hits) == hits_before, server.hits[hits_before:]
+finally:
+    guarded.process.stdin.close()
+    try:
+        guarded.process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        guarded.process.kill()
+        guarded.process.wait()
+        raise
+    assert guarded.process.returncode == 0, guarded.process.returncode
+
+print("PASS: fetch — --no-private-network refuses loopback literals and hostnames")
 server.shutdown()

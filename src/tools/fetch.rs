@@ -32,9 +32,9 @@ impl Request {
 }
 
 pub async fn run(request: &Request) -> Result<Value, String> {
-    let client = http::client()?;
+    let get = http::get(&request.url)?;
     let deadline = tokio::time::Instant::now() + request.timeout;
-    let response = tokio::time::timeout_at(deadline, client.get(&request.url).send())
+    let response = tokio::time::timeout_at(deadline, get.send())
         .await
         .map_err(|_| "Fetch request timed out".to_string())?
         .map_err(describe_request_error)?;
@@ -90,11 +90,19 @@ pub async fn run(request: &Request) -> Result<Value, String> {
 }
 
 /// Include the redirect policy's reason. primp's own display is only
-/// "error following redirect".
+/// "error following redirect". The innermost cause carries the reason, such as
+/// a refused private address from the resolver.
 fn describe_request_error(error: primp::Error) -> String {
     let error = error.without_url();
-    let source = std::error::Error::source(&error).map(ToString::to_string);
-    let detail = source.map_or_else(|| error.to_string(), |source| format!("{error}: {source}"));
+    let mut detail = error.to_string();
+    let mut source = std::error::Error::source(&error);
+    while let Some(cause) = source {
+        let text = cause.to_string();
+        if !detail.contains(&text) {
+            detail = format!("{detail}: {text}");
+        }
+        source = cause.source();
+    }
     format!("Fetch request failed: {detail}")
 }
 
