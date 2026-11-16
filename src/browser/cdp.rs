@@ -26,6 +26,7 @@ const READY_MARGIN: Duration = Duration::from_millis(250);
 #[derive(Debug)]
 pub enum ScrapeError {
     Cdp(String),
+    Context(String),
     Page(String),
     Transport(String),
 }
@@ -33,7 +34,10 @@ pub enum ScrapeError {
 impl ScrapeError {
     pub fn message(self) -> String {
         match self {
-            Self::Cdp(message) | Self::Page(message) | Self::Transport(message) => message,
+            Self::Cdp(message)
+            | Self::Context(message)
+            | Self::Page(message)
+            | Self::Transport(message) => message,
         }
     }
 
@@ -41,7 +45,7 @@ impl ScrapeError {
     /// can no longer speak CDP. Readiness, validation, and ordinary rejections
     /// drop the connection only.
     pub const fn reaps_browser(&self) -> bool {
-        matches!(self, Self::Transport(_))
+        matches!(self, Self::Context(_) | Self::Transport(_))
     }
 
     fn page(message: impl Into<String>) -> Self {
@@ -61,6 +65,7 @@ fn string_member<'a>(object: &'a Value, key: &str) -> &'a str {
 /// Isolated context and flattened session for one page fetch.
 struct PageTarget {
     context: String,
+    target: String,
     session: String,
 }
 
@@ -356,13 +361,14 @@ fn parse_message(text: &str) -> Result<Value, String> {
     serde_json::from_str(text).map_err(|error| format!("Invalid CDP JSON: {error}"))
 }
 
-/// Isolated context + flattened session for this page. `disposeOnDetach`
-/// releases the context even when the stream dies mid-scrape.
-async fn open_page(
+/// Create a context owned by this CDP connection. Shared mode retains this
+/// connection for the context's full lifetime; default mode disposes the
+/// context after one page.
+pub async fn create_browser_context(
     connection: &mut Connection,
     deadline: Instant,
-) -> Result<PageTarget, ScrapeError> {
-    let context = connection
+) -> Result<String, ScrapeError> {
+    connection
         .call(
             "Target.createBrowserContext",
             json!({"disposeOnDetach": true}),
@@ -372,8 +378,22 @@ async fn open_page(
         .await?
         .get("browserContextId")
         .and_then(Value::as_str)
-        .ok_or_else(|| ScrapeError::transport("Missing browserContextId in CDP result"))?
-        .to_string();
+        .map(str::to_string)
+        .ok_or_else(|| ScrapeError::transport("Missing browserContextId in CDP result"))
+}
+
+/// Isolated context + flattened session for this page, optionally using the
+/// process-owned public context.
+async fn open_page(
+    connection: &mut Connection,
+    shared_context: Option<&str>,
+    deadline: Instant,
+) -> Result<PageTarget, ScrapeError> {
+    let context = if let Some(context) = shared_context {
+        context.to_string()
+    } else {
+        create_browser_context(connection, deadline).await?
+    };
     let page = connection
         .call(
             "Target.createTarget",
@@ -400,7 +420,11 @@ async fn open_page(
         .to_string();
     connection.active_session.clone_from(&session);
     connection.page = PageState::default();
-    Ok(PageTarget { context, session })
+    Ok(PageTarget {
+        context,
+        target: page,
+        session,
+    })
 }
 
 /// Enable the domains extraction needs, navigate, and wait for page load.
@@ -661,15 +685,8 @@ pub async fn run_scrape(
     request: &PageRequest,
     deadline: Instant,
 ) -> Result<Value, ScrapeError> {
-    let target = open_page(connection, deadline).await?;
-    navigate(connection, request, &target.session, deadline).await?;
-    wait_after_load(request, deadline, &connection.stop).await?;
-    let mut result = extract(connection, request, &target.session, deadline).await?;
-    validate_extraction(&mut result, request)?;
-    if let Some(status) = connection.page.http_status {
-        apply_http_status(&mut result, status);
-    }
-    truncate_content(&mut result, request.max_chars);
+    let target = open_page(connection, None, deadline).await?;
+    let result = run_page(connection, request, &target, deadline).await;
     // Best effort. The page is already extracted; a failed dispose must not
     // drop it. Closing the socket still runs disposeOnDetach. Leaving the
     // socket out of the pool forces the next checkout to reconnect.
@@ -685,6 +702,72 @@ pub async fn run_scrape(
     {
         connection.ws = None;
     }
+    result
+}
+
+/// Fetch one page inside a caller-owned context and close only its target.
+pub async fn run_scrape_in_context(
+    connection: &mut Connection,
+    request: &PageRequest,
+    context: &str,
+    deadline: Instant,
+) -> Result<Value, ScrapeError> {
+    let target = open_page(connection, Some(context), deadline)
+        .await
+        .map_err(|error| match error {
+            ScrapeError::Cdp(message) => ScrapeError::Context(message),
+            other => other,
+        })?;
+    let result = run_page(connection, request, &target, deadline).await;
+    let closed = connection
+        .call(
+            "Target.closeTarget",
+            json!({"targetId": target.target}),
+            "",
+            deadline,
+        )
+        .await;
+    match (result, closed) {
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(match error {
+            ScrapeError::Cdp(message) => ScrapeError::Context(message),
+            other => other,
+        }),
+        (Ok(result), Ok(_)) => Ok(result),
+    }
+}
+
+/// Dispose a process-owned context before releasing its owner connection.
+pub async fn dispose_browser_context(
+    connection: &mut Connection,
+    context: &str,
+    deadline: Instant,
+) -> Result<(), ScrapeError> {
+    connection
+        .call(
+            "Target.disposeBrowserContext",
+            json!({"browserContextId": context}),
+            "",
+            deadline,
+        )
+        .await?;
+    Ok(())
+}
+
+async fn run_page(
+    connection: &mut Connection,
+    request: &PageRequest,
+    target: &PageTarget,
+    deadline: Instant,
+) -> Result<Value, ScrapeError> {
+    navigate(connection, request, &target.session, deadline).await?;
+    wait_after_load(request, deadline, &connection.stop).await?;
+    let mut result = extract(connection, request, &target.session, deadline).await?;
+    validate_extraction(&mut result, request)?;
+    if let Some(status) = connection.page.http_status {
+        apply_http_status(&mut result, status);
+    }
+    truncate_content(&mut result, request.max_chars);
     Ok(result)
 }
 

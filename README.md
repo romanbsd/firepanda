@@ -80,6 +80,7 @@ firepanda [--backend lightpanda|obscura|auto]
           [--cdp-url ws://host:port/devtools/browser]
           [--idle-timeout SECONDS]
           [--stealth] [--obey-robots] [--no-private-network]
+          [--shared-browser-context]
 ```
 
 - The default is Lightpanda; `--lightpanda PATH` is kept as an alias for
@@ -109,6 +110,14 @@ Both engines receive the same CDP pipeline: a fresh browser context per page,
 Obscura delivers navigation events before the `Page.navigate` reply, so firepanda
 buffers an early document `load` and applies it once the frame id is known. See
 [browser backends](docs/browser-backends.md) for the evaluation and design.
+
+`--shared-browser-context` is an opt-in mode for one research run in one stdio
+process. It requires a managed Lightpanda backend, keeps one isolated context
+on its owning CDP connection for at most 900 seconds, and closes each page
+after extraction. After expiry or owner/browser loss, new browser work fails
+until Firepanda is restarted. The default remains a fresh context per page.
+`--no-private-network` keeps the same managed-browser and raw-HTTP guard behavior
+in either mode.
 
 To install Firepanda under a user-owned prefix:
 

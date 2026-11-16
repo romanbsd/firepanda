@@ -11,7 +11,9 @@ firepanda [--backend lightpanda|obscura|auto]
           [--cdp-url ws://host:port/devtools/browser]
           [--idle-timeout SECONDS]
           [--stealth] [--obey-robots] [--no-private-network]
+          [--shared-browser-context]
 Managed browser idle timeout: 60 seconds by default; 0 disables it.
+Shared browser context mode is Lightpanda-only and expires after 900 seconds.
 MCP over stdio; starts the selected browser lazily unless --socket/--cdp-url is given.
 ";
 
@@ -99,6 +101,7 @@ fn parse_args(args: Vec<String>) -> Result<Command, String> {
             "--stealth" => options.stealth = true,
             "--obey-robots" => options.obey_robots = true,
             "--no-private-network" => options.allow_private_network = false,
+            "--shared-browser-context" => options.shared_browser_context = true,
             other => return Err(format!("Unknown or incomplete option: {other}")),
         }
     }
@@ -160,6 +163,13 @@ fn finish(
     }
     if options.obey_robots && !obscura {
         return Err("--obey-robots requires --backend obscura".to_string());
+    }
+    if options.shared_browser_context && options.backend != Backend::Lightpanda {
+        return Err("--shared-browser-context requires managed Lightpanda".to_string());
+    }
+    if options.shared_browser_context && (!options.socket.is_empty() || !options.cdp_url.is_empty())
+    {
+        return Err("--shared-browser-context cannot use an external CDP endpoint".to_string());
     }
     // An external browser keeps its own network policy; only a managed one can be guarded.
     if !options.allow_private_network && !options.socket.is_empty() {
@@ -239,6 +249,18 @@ mod tests {
         assert_eq!(options.backend, Backend::Lightpanda);
         assert_eq!(options.program, "lightpanda");
         assert!(options.allow_private_network);
+    }
+
+    #[test]
+    fn shared_context_is_opt_in_and_lightpanda_managed_only() {
+        let default = parse_ok(&[]);
+        assert!(!default.shared_browser_context);
+        let shared = parse_ok(&["--shared-browser-context"]);
+        assert!(shared.shared_browser_context);
+        assert_eq!(shared.backend, Backend::Lightpanda);
+        assert!(run(&["--backend", "obscura", "--shared-browser-context"]).is_err());
+        assert!(run(&["--socket", "/tmp/cdp.sock", "--shared-browser-context"]).is_err());
+        assert!(run(&["--cdp-url", "ws://127.0.0.1:1", "--shared-browser-context"]).is_err());
     }
 
     #[test]

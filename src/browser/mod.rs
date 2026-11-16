@@ -10,6 +10,7 @@ use serde_json::Value;
 use std::io::Read;
 use std::os::fd::AsFd;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpStream, UnixStream};
@@ -39,6 +40,9 @@ const STOPPING: &str = "Service is stopping";
 /// Obscura caps in-page script execution per process, so raise that cap to the
 /// largest page budget instead of silently truncating extraction.
 pub const MAX_PAGE_TIMEOUT_MS: i64 = 120_000;
+const SHARED_CONTEXT_LIFETIME: Duration = Duration::from_mins(15);
+const SHARED_CONTEXT_DRAIN: Duration = Duration::from_secs(120);
+const SHARED_CONTEXT_DISPOSE_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Backend {
@@ -80,6 +84,7 @@ pub enum Endpoint {
 }
 
 #[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct Options {
     pub backend: Backend,
     /// Browser executable; `--browser` or the backend-specific alias.
@@ -95,6 +100,8 @@ pub struct Options {
     /// Obscura blocks loopback/RFC1918/link-local by default. Firepanda keeps
     /// Lightpanda's behaviour (local sites are scrapeable) unless disabled.
     pub allow_private_network: bool,
+    /// Reuse one isolated browser context for this stdio process.
+    pub shared_browser_context: bool,
 }
 
 impl Default for Options {
@@ -108,6 +115,7 @@ impl Default for Options {
             stealth: false,
             obey_robots: false,
             allow_private_network: true,
+            shared_browser_context: false,
         }
     }
 }
@@ -213,6 +221,20 @@ struct Process {
     /// Obscura control-plane bearer token; None for Lightpanda.
     token: Option<String>,
     idle_since: Option<Instant>,
+    generation: u64,
+}
+
+struct SharedContext {
+    id: String,
+    expires_at: Instant,
+    generation: u64,
+    owner: Connection,
+}
+
+enum SharedContextState {
+    New,
+    Active(Box<SharedContext>),
+    Closed,
 }
 
 struct Inner {
@@ -223,8 +245,11 @@ struct Inner {
     /// False for `--socket`/`--cdp-url`: an external peer is never spawned or
     /// killed.
     owns_process: bool,
+    shared_context: Arc<Mutex<SharedContextState>>,
+    shared_admissions_closed: AtomicBool,
 }
 
+#[derive(Clone)]
 pub struct Browser {
     inner: Arc<Inner>,
 }
@@ -267,10 +292,13 @@ impl Browser {
                     endpoint,
                     token: None,
                     idle_since: None,
+                    generation: 0,
                 }),
                 free: Mutex::new(Vec::new()),
                 stop,
                 owns_process,
+                shared_context: Arc::new(Mutex::new(SharedContextState::New)),
+                shared_admissions_closed: AtomicBool::new(false),
             }),
         }
     }
@@ -279,6 +307,16 @@ impl Browser {
     /// child. A page error (readiness, validation, a rejected command) drops
     /// that connection and leaves the browser up.
     pub async fn scrape(&self, request: &PageRequest) -> Result<Value, String> {
+        let shared_browser_context = self
+            .inner
+            .process
+            .lock()
+            .await
+            .options
+            .shared_browser_context;
+        if shared_browser_context {
+            return self.scrape_shared(request).await;
+        }
         let (deadline, connect_deadline) = self.begin(request.timeout).await;
         match self.fetch(request, deadline, connect_deadline).await {
             Ok(value) => Ok(value),
@@ -332,11 +370,277 @@ impl Browser {
         Ok(result)
     }
 
+    async fn scrape_shared(&self, request: &PageRequest) -> Result<Value, String> {
+        let (deadline, connect_deadline) = self.begin(request.timeout).await;
+        let mut state = tokio::time::timeout_at(
+            deadline.into(),
+            Arc::clone(&self.inner.shared_context).lock_owned(),
+        )
+        .await
+        .map_err(|_| "Browser operation timed out".to_string())?;
+        let prepared = self
+            .prepare_shared_context(&mut state, deadline, connect_deadline)
+            .await;
+        if let Err(error) = prepared {
+            let message = error.message;
+            let reap = error.reap;
+            drop(state);
+            if reap {
+                self.shutdown().await;
+            }
+            return Err(message);
+        }
+        let result = match &mut *state {
+            SharedContextState::Active(context) => {
+                cdp::run_scrape_in_context(&mut context.owner, request, &context.id, deadline)
+                    .await
+                    .map_err(|error| PageError {
+                        reap: error.reaps_browser(),
+                        message: error.message(),
+                    })
+            }
+            SharedContextState::New | SharedContextState::Closed => Err(PageError {
+                message: "Shared browser context is closed; restart Firepanda to begin a new run"
+                    .to_string(),
+                reap: true,
+            }),
+        };
+        if result.as_ref().is_err_and(|error| error.reap) {
+            self.close_shared_admissions(&mut state);
+        }
+        drop(state);
+        match result {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                if error.reap {
+                    self.shutdown().await;
+                }
+                Err(error.message)
+            }
+        }
+    }
+
+    fn close_shared_admissions(&self, state: &mut SharedContextState) {
+        self.inner
+            .shared_admissions_closed
+            .store(true, Ordering::SeqCst);
+        *state = SharedContextState::Closed;
+    }
+
+    async fn prepare_shared_context(
+        &self,
+        state: &mut SharedContextState,
+        deadline: Instant,
+        connect_deadline: Instant,
+    ) -> Result<(), PageError> {
+        self.ensure_shared_admissions_open()?;
+        let admission = match state {
+            SharedContextState::New => {
+                self.open_shared_context(state, deadline, connect_deadline)
+                    .await
+            }
+            SharedContextState::Active(context) => {
+                self.check_shared_context(context, deadline).await
+            }
+            SharedContextState::Closed => Err(PageError {
+                message: "Shared browser context is closed; restart Firepanda to begin a new run"
+                    .to_string(),
+                reap: true,
+            }),
+        };
+        if let Err(error) = admission {
+            self.close_shared_admissions(state);
+            return Err(error);
+        }
+        if Instant::now() >= deadline {
+            self.close_shared_admissions(state);
+            return Err(PageError {
+                message: "Browser operation timed out".to_string(),
+                reap: true,
+            });
+        }
+        Ok(())
+    }
+
+    fn ensure_shared_admissions_open(&self) -> Result<(), PageError> {
+        if self.inner.shared_admissions_closed.load(Ordering::SeqCst) {
+            Err(PageError {
+                message: "Shared browser context is closed; restart Firepanda to begin a new run"
+                    .to_string(),
+                reap: true,
+            })
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn open_shared_context(
+        &self,
+        state: &mut SharedContextState,
+        deadline: Instant,
+        connect_deadline: Instant,
+    ) -> Result<(), PageError> {
+        let mut owner = Connection::new(self.inner.stop.clone());
+        if let Err(message) = self.connect(&mut owner, connect_deadline).await {
+            self.close_shared_admissions(state);
+            return Err(PageError {
+                message,
+                reap: true,
+            });
+        }
+        self.ensure_shared_deadline(state, deadline)?;
+        let generation = {
+            let mut process = self.inner.process.lock().await;
+            let alive = process
+                .child
+                .as_mut()
+                .is_some_and(|child| matches!(child.try_wait(), Ok(None)));
+            if !alive {
+                self.close_shared_admissions(state);
+                return Err(PageError {
+                    message: "Managed browser stopped before the shared context opened".to_string(),
+                    reap: true,
+                });
+            }
+            process.generation
+        };
+        self.ensure_shared_deadline(state, deadline)?;
+        let id = match cdp::create_browser_context(&mut owner, deadline).await {
+            Ok(id) => id,
+            Err(error) => {
+                self.close_shared_admissions(state);
+                return Err(PageError {
+                    message: error.message(),
+                    reap: true,
+                });
+            }
+        };
+        *state = SharedContextState::Active(Box::new(SharedContext {
+            id,
+            expires_at: Instant::now() + SHARED_CONTEXT_LIFETIME,
+            generation,
+            owner,
+        }));
+        Ok(())
+    }
+
+    async fn check_shared_context(
+        &self,
+        context: &mut SharedContext,
+        deadline: Instant,
+    ) -> Result<(), PageError> {
+        let alive = {
+            let mut process = self.inner.process.lock().await;
+            process.generation == context.generation
+                && process
+                    .child
+                    .as_mut()
+                    .is_some_and(|child| matches!(child.try_wait(), Ok(None)))
+        };
+        let expired = Instant::now() >= context.expires_at;
+        let timed_out = Instant::now() >= deadline;
+        if alive && !expired && !timed_out {
+            return Ok(());
+        }
+        let message = if expired {
+            "Shared browser context expired; restart Firepanda to begin a new run".to_string()
+        } else if !alive {
+            "Managed browser restarted or stopped; shared browser context is closed".to_string()
+        } else {
+            "Browser operation timed out".to_string()
+        };
+        if alive {
+            let dispose_deadline = Instant::now() + SHARED_CONTEXT_DISPOSE_TIMEOUT;
+            let _ = cdp::dispose_browser_context(&mut context.owner, &context.id, dispose_deadline)
+                .await;
+        }
+        self.inner
+            .shared_admissions_closed
+            .store(true, Ordering::SeqCst);
+        Err(PageError {
+            message,
+            reap: true,
+        })
+    }
+
+    fn ensure_shared_deadline(
+        &self,
+        state: &mut SharedContextState,
+        deadline: Instant,
+    ) -> Result<(), PageError> {
+        if Instant::now() < deadline {
+            return Ok(());
+        }
+        self.close_shared_admissions(state);
+        Err(PageError {
+            message: "Browser operation timed out".to_string(),
+            reap: true,
+        })
+    }
+
     /// Fetch one page on a pool connection for the crawl loop. The dispatch task checks out inline — launching the
     /// managed browser if needed — so concurrent pages can never race a second
     /// spawn; a checkout failure surfaces as `Failed` without releasing the
     /// browser, which the crawl loop reaps after draining siblings.
     pub async fn start_page(&self, request: PageRequest) -> PageTask {
+        let shared_browser_context = self
+            .inner
+            .process
+            .lock()
+            .await
+            .options
+            .shared_browser_context;
+        if shared_browser_context {
+            let (deadline, connect_deadline) = self.begin(request.timeout).await;
+            let Ok(mut state) = tokio::time::timeout_at(
+                deadline.into(),
+                Arc::clone(&self.inner.shared_context).lock_owned(),
+            )
+            .await
+            else {
+                return PageTask::Failed("Browser operation timed out".to_string());
+            };
+            if let Err(error) = self
+                .prepare_shared_context(&mut state, deadline, connect_deadline)
+                .await
+            {
+                let message = error.message;
+                drop(state);
+                self.shutdown().await;
+                return PageTask::Failed(message);
+            }
+            let browser = self.clone();
+            return PageTask::Running(tokio::spawn(async move {
+                let mut state = state;
+                let result = match &mut *state {
+                    SharedContextState::Active(context) => cdp::run_scrape_in_context(
+                        &mut context.owner,
+                        &request,
+                        &context.id,
+                        deadline,
+                    )
+                    .await
+                    .map_err(|error| PageError {
+                        reap: error.reaps_browser(),
+                        message: error.message(),
+                    }),
+                    SharedContextState::New | SharedContextState::Closed => Err(PageError {
+                        message:
+                            "Shared browser context is closed; restart Firepanda to begin a new run"
+                                .to_string(),
+                        reap: true,
+                    }),
+                };
+                if result.as_ref().is_err_and(|error| error.reap) {
+                    browser.close_shared_admissions(&mut state);
+                }
+                drop(state);
+                if result.as_ref().is_err_and(|error| error.reap) {
+                    browser.shutdown().await;
+                }
+                result
+            }));
+        }
         let (deadline, connect_deadline) = self.begin(request.timeout).await;
         let connection = match self.checkout(connect_deadline).await {
             Ok(connection) => connection,
@@ -459,6 +763,33 @@ impl Browser {
     /// endpoint: only the pool is cleared. Called after failures, on idle
     /// expiry, and when the service exits.
     pub async fn shutdown(&self) {
+        let shared_browser_context = self
+            .inner
+            .process
+            .lock()
+            .await
+            .options
+            .shared_browser_context;
+        if shared_browser_context {
+            self.inner
+                .shared_admissions_closed
+                .store(true, Ordering::SeqCst);
+            let shared_context = Arc::clone(&self.inner.shared_context);
+            let _ = tokio::time::timeout(SHARED_CONTEXT_DRAIN, async move {
+                let mut state = shared_context.lock().await;
+                if let SharedContextState::Active(context) = &mut *state {
+                    let dispose_deadline = Instant::now() + SHARED_CONTEXT_DISPOSE_TIMEOUT;
+                    let _ = cdp::dispose_browser_context(
+                        &mut context.owner,
+                        &context.id,
+                        dispose_deadline,
+                    )
+                    .await;
+                }
+                *state = SharedContextState::Closed;
+            })
+            .await;
+        }
         self.inner.free.lock().await.clear();
         let mut process = self.inner.process.lock().await;
         stop_child(&mut process).await;
@@ -474,6 +805,16 @@ impl Browser {
     /// Stop an expired idle browser and return the next deadline. Expiry and
     /// deadline are read under one lock; `shutdown` only re-locks when it runs.
     pub async fn expire_if_idle(&self) -> Option<Instant> {
+        if self
+            .inner
+            .process
+            .lock()
+            .await
+            .options
+            .shared_browser_context
+        {
+            return None;
+        }
         let deadline = {
             let process = self.inner.process.lock().await;
             if !self.inner.owns_process
@@ -655,6 +996,10 @@ fn launch(process: &mut Process) -> Result<(), String> {
     if running {
         return Ok(()); // Still running; reuse it.
     }
+    let next_generation = process
+        .generation
+        .checked_add(1)
+        .ok_or_else(|| "Managed browser generation exhausted".to_string())?;
     process.child = None;
     process.endpoint = None;
     process.token = None;
@@ -668,6 +1013,8 @@ fn launch(process: &mut Process) -> Result<(), String> {
         .map_err(|error| start_error(process, &error))?;
     let mut command = Command::new(&process.options.program);
     command
+        .env_clear()
+        .envs(browser_environment())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::from(stdout))
         .stderr(std::process::Stdio::inherit())
@@ -725,7 +1072,17 @@ fn launch(process: &mut Process) -> Result<(), String> {
         write_owner(process, pid);
     }
     process.child = Some(child);
+    process.generation = next_generation;
     Ok(())
+}
+
+/// Browser children need paths and locale/temp defaults, not Firepanda's
+/// provider keys, proxy settings, or arbitrary caller environment.
+fn browser_environment() -> Vec<(String, std::ffi::OsString)> {
+    ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL"]
+        .into_iter()
+        .filter_map(|key| std::env::var_os(key).map(|value| (key.to_string(), value)))
+        .collect()
 }
 
 /// Record ownership so a later firepanda can reap this browser if we die
@@ -1093,5 +1450,56 @@ mod tests {
         assert_eq!(process.directory, "");
         assert!(process.child.is_none());
         drop(process);
+    }
+
+    #[tokio::test]
+    async fn queued_shared_context_admission_fails_after_expiry() {
+        let browser = Browser::new(
+            Options {
+                shared_browser_context: true,
+                ..Options::default()
+            },
+            Stop::channel(),
+        );
+        let queued_at = Instant::now();
+        let owner = Connection::new(browser.inner.stop.clone());
+        *browser.inner.shared_context.lock().await =
+            SharedContextState::Active(Box::new(SharedContext {
+                id: "controlled-context".to_string(),
+                expires_at: queued_at + Duration::from_millis(30),
+                generation: 0,
+                owner,
+            }));
+        let held = Arc::clone(&browser.inner.shared_context).lock_owned().await;
+        let queued_browser = browser.clone();
+        let admission = tokio::spawn(async move {
+            let mut state = queued_browser
+                .inner
+                .shared_context
+                .clone()
+                .lock_owned()
+                .await;
+            queued_browser
+                .prepare_shared_context(
+                    &mut state,
+                    Instant::now() + Duration::from_secs(5),
+                    Instant::now() + Duration::from_secs(1),
+                )
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        drop(held);
+        let error = admission.await.unwrap().unwrap_err();
+        assert!(error.message.contains("expired"), "{}", error.message);
+        assert!(
+            browser
+                .inner
+                .shared_admissions_closed
+                .load(Ordering::SeqCst)
+        );
+        assert!(matches!(
+            &*browser.inner.shared_context.lock().await,
+            SharedContextState::Closed
+        ));
     }
 }

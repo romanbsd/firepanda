@@ -36,6 +36,8 @@ jobs:
         run: python3 tests/search.py target/release/firepanda "$PWD/.local/bin/lightpanda"
       - name: Native integration gate
         run: python3 tests/integration.py target/release/firepanda "$PWD/.local/bin/lightpanda"
+      - name: Shared browser context lifecycle gate
+        run: python3 tests/shared_context.py target/release/firepanda "$PWD/.local/bin/lightpanda"
       - name: Memory and descriptor hygiene gate
         run: python3 tests/memory.py target/release/firepanda "$PWD/.local/bin/lightpanda"
       - name: Verify release packaging
