@@ -19,6 +19,7 @@ const DISCONNECTED: &str = "CDP disconnected or returned a non-text frame";
 const TOO_LARGE: &str = "Browser reply exceeds 16 MiB; request fewer formats";
 /// Readiness budget held back from the extractor for the reply round trip.
 const READY_MARGIN: Duration = Duration::from_millis(250);
+const SHARED_TARGET_CLEANUP_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// CDP rejection (peer answered with an `error` object), a page-level failure
 /// (readiness, validation, extraction), or a transport failure that makes the
@@ -719,21 +720,57 @@ pub async fn run_scrape_in_context(
             other => other,
         })?;
     let result = run_page(connection, request, &target, deadline).await;
-    let closed = connection
+    let closed = close_shared_target(connection, &target.target).await;
+    match (result, closed) {
+        (Err(primary), Ok(())) => Err(primary),
+        (Err(primary), Err(_cleanup)) => {
+            let message = primary.message();
+            let _ = dispose_browser_context(
+                connection,
+                context,
+                Instant::now() + SHARED_TARGET_CLEANUP_TIMEOUT,
+            )
+            .await;
+            // Keep the page failure visible to the caller while marking the
+            // shared owner/context as unusable for all later admissions.
+            Err(ScrapeError::Context(message))
+        }
+        (Ok(_), Err(cleanup)) => {
+            let message = cleanup.message();
+            let _ = dispose_browser_context(
+                connection,
+                context,
+                Instant::now() + SHARED_TARGET_CLEANUP_TIMEOUT,
+            )
+            .await;
+            Err(ScrapeError::Context(message))
+        }
+        (Ok(result), Ok(())) => Ok(result),
+    }
+}
+
+async fn close_shared_target(connection: &mut Connection, target: &str) -> Result<(), ScrapeError> {
+    let result = connection
         .call(
             "Target.closeTarget",
-            json!({"targetId": target.target}),
+            json!({"targetId": target}),
             "",
-            deadline,
+            Instant::now() + SHARED_TARGET_CLEANUP_TIMEOUT,
         )
-        .await;
-    match (result, closed) {
-        (Err(error), _) => Err(error),
-        (Ok(_), Err(error)) => Err(match error {
-            ScrapeError::Cdp(message) => ScrapeError::Context(message),
-            other => other,
-        }),
-        (Ok(result), Ok(_)) => Ok(result),
+        .await
+        .map_err(|error| ScrapeError::Context(error.message()))?;
+    validate_target_closed(&result)
+}
+
+fn validate_target_closed(result: &Value) -> Result<(), ScrapeError> {
+    match result.get("success").and_then(Value::as_bool) {
+        Some(true) => Ok(()),
+        Some(false) => Err(ScrapeError::Context(
+            "Target.closeTarget returned success=false".to_string(),
+        )),
+        None => Err(ScrapeError::Context(
+            "Target.closeTarget returned a malformed result".to_string(),
+        )),
     }
 }
 
@@ -785,6 +822,108 @@ mod tests {
         );
         assert!(parse_message("[]").is_ok());
         assert!(parse_message("{").is_err());
+    }
+
+    #[test]
+    fn target_close_requires_true_success_result() {
+        assert!(validate_target_closed(&json!({"success": true})).is_ok());
+        assert!(matches!(
+            validate_target_closed(&json!({"success": false})),
+            Err(ScrapeError::Context(_))
+        ));
+        assert!(matches!(
+            validate_target_closed(&json!({})),
+            Err(ScrapeError::Context(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn shared_page_timeout_and_close_failure_dispose_context_and_keep_primary_error() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio::net::{TcpListener, TcpStream};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut websocket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let mut methods = Vec::new();
+            while let Some(Ok(Message::Text(text))) = websocket.next().await {
+                let request: Value = serde_json::from_str(text.as_str()).unwrap();
+                let method = request["method"].as_str().unwrap().to_string();
+                methods.push(method.clone());
+                if method == "Page.navigate" {
+                    // Let the caller deadline expire. The late reply is ignored
+                    // by command id while closeTarget uses its own cleanup budget.
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+                let mut reply = json!({"id": request["id"], "result": {}});
+                if let Some(session) = request.get("sessionId") {
+                    reply["sessionId"] = session.clone();
+                }
+                match method.as_str() {
+                    "Target.createTarget" => reply["result"] = json!({"targetId": "page"}),
+                    "Target.attachToTarget" => {
+                        reply["result"] = json!({"sessionId": "session"});
+                    }
+                    "Page.navigate" => reply["result"] = json!({"frameId": "main"}),
+                    "Target.closeTarget" => {
+                        reply.as_object_mut().unwrap().remove("result");
+                        reply["error"] = json!({"code": -32000, "message": "close failed"});
+                    }
+                    "Target.disposeBrowserContext" => {
+                        let _ = websocket.send(Message::text(reply.to_string())).await;
+                        break;
+                    }
+                    _ => {}
+                }
+                websocket
+                    .send(Message::text(reply.to_string()))
+                    .await
+                    .unwrap();
+            }
+            methods
+        });
+        let stream = TcpStream::connect(address).await.unwrap();
+        let stream: Box<dyn super::super::AsyncReadWrite> = Box::new(stream);
+        let (websocket, _) = tokio_tungstenite::client_async("ws://localhost/", stream)
+            .await
+            .unwrap();
+        let mut connection = Connection::new(Stop::channel());
+        connection.attach(websocket);
+        let request = PageRequest {
+            url: "https://example.com".to_string(),
+            formats: vec![Format::Markdown],
+            only_main_content: true,
+            timeout: Duration::from_millis(150),
+            wait_for: Duration::ZERO,
+            wait_for_selector: String::new(),
+            wait_for_text: String::new(),
+            max_chars: 0,
+            markdown_links: "full",
+        };
+
+        let error = run_scrape_in_context(
+            &mut connection,
+            &request,
+            "shared-context",
+            Instant::now() + request.timeout,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(&error, ScrapeError::Context(_)));
+        assert!(error.reaps_browser());
+        assert_eq!(error.message(), TIMED_OUT);
+        let methods = peer.await.unwrap();
+        assert!(
+            methods.contains(&"Target.closeTarget".to_string()),
+            "{methods:?}"
+        );
+        assert!(
+            methods.contains(&"Target.disposeBrowserContext".to_string()),
+            "{methods:?}"
+        );
     }
 
     #[test]
