@@ -13,7 +13,7 @@ firepanda [--backend lightpanda|obscura|auto]
           [--stealth] [--obey-robots] [--no-private-network]
           [--shared-browser-context]
 Managed browser idle timeout: 60 seconds by default; 0 disables it.
-Shared browser context mode is Lightpanda-only and expires after 900 seconds.
+Shared browser context mode is Lightpanda-only, admits page work for 900 seconds, and caps active page execution at expiry.
 MCP over stdio; starts the selected browser lazily unless --socket/--cdp-url is given.
 ";
 

@@ -237,6 +237,13 @@ enum SharedContextState {
     Closed,
 }
 
+fn shared_page_deadline(state: &SharedContextState, deadline: Instant) -> Instant {
+    match state {
+        SharedContextState::Active(context) => deadline.min(context.expires_at),
+        SharedContextState::New | SharedContextState::Closed => deadline,
+    }
+}
+
 struct Inner {
     process: Mutex<Process>,
     /// Idle connections between page fetches; returned through `give_back`.
@@ -378,6 +385,7 @@ impl Browser {
         )
         .await
         .map_err(|_| "Browser operation timed out".to_string())?;
+        let deadline = shared_page_deadline(&state, deadline);
         let prepared = self
             .prepare_shared_context(&mut state, deadline, connect_deadline)
             .await;
@@ -600,6 +608,7 @@ impl Browser {
             else {
                 return PageTask::Failed("Browser operation timed out".to_string());
             };
+            let deadline = shared_page_deadline(&state, deadline);
             if let Err(error) = self
                 .prepare_shared_context(&mut state, deadline, connect_deadline)
                 .await
@@ -805,15 +814,26 @@ impl Browser {
     /// Stop an expired idle browser and return the next deadline. Expiry and
     /// deadline are read under one lock; `shutdown` only re-locks when it runs.
     pub async fn expire_if_idle(&self) -> Option<Instant> {
-        if self
+        let shared_browser_context = self
             .inner
             .process
             .lock()
             .await
             .options
-            .shared_browser_context
-        {
-            return None;
+            .shared_browser_context;
+        if shared_browser_context {
+            let deadline = match &*self.inner.shared_context.lock().await {
+                SharedContextState::Active(context) => Some(context.expires_at),
+                SharedContextState::New | SharedContextState::Closed => None,
+            };
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                self.inner
+                    .shared_admissions_closed
+                    .store(true, Ordering::SeqCst);
+                self.shutdown().await;
+                return None;
+            }
+            return deadline;
         }
         let deadline = {
             let process = self.inner.process.lock().await;
@@ -1491,6 +1511,99 @@ mod tests {
         drop(held);
         let error = admission.await.unwrap().unwrap_err();
         assert!(error.message.contains("expired"), "{}", error.message);
+        assert!(
+            browser
+                .inner
+                .shared_admissions_closed
+                .load(Ordering::SeqCst)
+        );
+        assert!(matches!(
+            &*browser.inner.shared_context.lock().await,
+            SharedContextState::Closed
+        ));
+    }
+
+    #[test]
+    fn shared_page_execution_is_capped_at_context_expiry() {
+        let now = Instant::now();
+        let request_deadline = now + Duration::from_secs(30);
+        let expires_at = now + Duration::from_secs(5);
+        let active = SharedContextState::Active(Box::new(SharedContext {
+            id: "context".to_string(),
+            expires_at,
+            generation: 0,
+            owner: Connection::new(Stop::channel()),
+        }));
+
+        assert_eq!(shared_page_deadline(&active, request_deadline), expires_at);
+        assert_eq!(
+            shared_page_deadline(&active, now + Duration::from_secs(2)),
+            now + Duration::from_secs(2)
+        );
+    }
+
+    #[tokio::test]
+    async fn shared_context_idle_expiry_disposes_without_another_request() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio::net::{TcpListener, TcpStream};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut websocket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let message = websocket.next().await.unwrap().unwrap();
+            let Message::Text(text) = message else {
+                panic!("expected the context disposal command");
+            };
+            let request: Value = serde_json::from_str(text.as_str()).unwrap();
+            assert_eq!(request["method"], "Target.disposeBrowserContext");
+            assert_eq!(request["params"]["browserContextId"], "controlled-context");
+            websocket
+                .send(Message::text(
+                    serde_json::json!({"id": request["id"], "result": {}}).to_string(),
+                ))
+                .await
+                .unwrap();
+        });
+        let stream = TcpStream::connect(address).await.unwrap();
+        let stream: Box<dyn AsyncReadWrite> = Box::new(stream);
+        let (websocket, _) = tokio_tungstenite::client_async("ws://localhost/", stream)
+            .await
+            .unwrap();
+        let browser = Browser::new(
+            Options {
+                shared_browser_context: true,
+                ..Options::default()
+            },
+            Stop::channel(),
+        );
+        let mut owner = Connection::new(browser.inner.stop.clone());
+        owner.attach(websocket);
+        let expires_at = Instant::now() + Duration::from_millis(40);
+        *browser.inner.shared_context.lock().await =
+            SharedContextState::Active(Box::new(SharedContext {
+                id: "controlled-context".to_string(),
+                expires_at,
+                generation: 0,
+                owner,
+            }));
+
+        let deadline = browser.expire_if_idle().await.unwrap();
+        assert_eq!(deadline, expires_at);
+        tokio::select! {
+            () = crate::idle_wait(Some(deadline.into())) => panic!("idle expiry fired early"),
+            () = tokio::time::sleep(Duration::from_millis(5)) => {}
+        }
+        assert!(matches!(
+            &*browser.inner.shared_context.lock().await,
+            SharedContextState::Active(_)
+        ));
+
+        tokio::time::sleep_until(deadline.into()).await;
+        assert!(browser.expire_if_idle().await.is_none());
+        peer.await.unwrap();
         assert!(
             browser
                 .inner

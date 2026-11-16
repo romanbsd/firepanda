@@ -113,9 +113,13 @@ buffers an early document `load` and applies it once the frame id is known. See
 
 `--shared-browser-context` is an opt-in mode for one research run in one stdio
 process. It requires a managed Lightpanda backend, keeps one isolated context
-on its owning CDP connection for at most 900 seconds, and closes each page
-after extraction. After expiry or owner/browser loss, new browser work fails
-until Firepanda is restarted. The default remains a fresh context per page.
+on its owning CDP connection for a 900-second admission lifetime, and closes
+each page after extraction. An active page's execution deadline is capped at
+the remaining lifetime; idle expiry closes the context without waiting for
+another browser request. Context disposal and managed-browser cleanup may
+continue for their bounded drain period after the admission lifetime ends.
+After expiry or owner/browser loss, new browser work fails until Firepanda is
+restarted. The default remains a fresh context per page.
 `--no-private-network` keeps the same managed-browser and raw-HTTP guard behavior
 in either mode.
 
